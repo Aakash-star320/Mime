@@ -72,7 +72,7 @@
     {
       "resources": [
         "/locales/*",
-        "/icon-dev-128.png",
+        
         "/elementSelector.css",
         "elementSelector.bundle.js",
         "/Inter-roman-latin.var.woff2"

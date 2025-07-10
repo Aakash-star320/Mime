@@ -208,7 +208,7 @@ const paramsList = {
 const os = navigator.appVersion.indexOf('Mac') !== -1 ? 'mac' : 'win';
 
 const logoUrl = browser.runtime.getURL(
-  process.env.NODE_ENV === 'development' ? '/icon-dev-128.png' : '/icon-128.png'
+  process.env.NODE_ENV === 'development' ? '' : '/icon-128.png'
 );
 
 const inputRef = ref(null);

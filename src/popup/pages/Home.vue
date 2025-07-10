@@ -10,16 +10,27 @@
     <div class="mb-4 flex items-center">
       <h1 class="text-xl font-semibold text-white">Automa</h1>
       <div class="grow"></div>
+      
+      <!-- RECORDING BUTTON -->
       <ui-button
-        v-tooltip.group="
-          'Start recording by opening the dashboard. Click to learn more'
-        "
+        v-if="!isRecording"
+        v-tooltip.group="'Start Recording'"
         icon
-        class="mr-2"
-        @click="openDocs"
+        class="mr-2 recording-btn"
+        @click="startRecording"
       >
-        <v-remixicon name="riRecordCircleLine" />
+        <v-remixicon name="riRecordCircleLine" class="text-red-400" />
       </ui-button>
+      <ui-button
+        v-else
+        v-tooltip.group="'Stop Recording'"
+        icon
+        class="mr-2 recording-btn animate-pulse"
+        @click="stopRecording"
+      >
+        <v-remixicon name="riStopCircleLine" class="text-red-400" />
+      </ui-button>
+      
       <ui-button
         v-tooltip.group="
           t(`home.elementSelector.${state.haveAccess ? 'name' : 'noAccess'}`)
@@ -160,17 +171,11 @@
       v-if="state.showSettingsPopup"
       class="fixed bottom-5 left-0 m-4 rounded-lg bg-accent p-4 text-white shadow-md dark:text-black z-10"
     >
-      <p class="text-sm leading-tight">
-        If the workflow runs for less than 5 minutes, set it to run in the
-        background in the
-        <a
-          href="https://docs.automa.site/workflow/settings.html#workflow-execution"
-          class="font-semibold underline"
-          target="_blank"
-        >
-          workflow settings.
-        </a>
-      </p>
+    <p class="text-sm leading-tight">
+  If the workflow runs for less than 5 minutes, set it to run in the
+  background in the
+    
+</p>
       <v-remixicon
         name="riCloseLine"
         class="absolute top-2 right-2 cursor-pointer text-gray-300 dark:text-gray-600"
@@ -194,8 +199,9 @@ import { useTeamWorkflowStore } from '@/stores/teamWorkflow';
 import { useUserStore } from '@/stores/user';
 import { useWorkflowStore } from '@/stores/workflow';
 import { arraySorter, parseJSON } from '@/utils/helper';
+import { sendMessage } from '@/utils/message';
 import automa from '@business';
-import { computed, onMounted, shallowReactive, watch } from 'vue';
+import { computed, onMounted, shallowReactive, watch, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
 import browser from 'webextension-polyfill';
 
@@ -232,6 +238,8 @@ const state = shallowReactive({
     ? false
     : parseJSON(localStorage.getItem('settingsPopup'), true) ?? true,
 });
+
+const isRecording = ref(false);
 
 const pinnedWorkflows = computed(() => {
   if (state.activeTab !== 'local') return [];
@@ -378,6 +386,87 @@ function onTabChange(value) {
   localStorage.setItem('popup-tab', value);
 }
 
+const startRecording = async () => {
+  try {
+    const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+    
+    if (!tab) {
+      dialog.confirm({
+        title: 'No Active Tab',
+        body: 'Please open a webpage first before starting recording.',
+        onlyOk: true,
+      });
+      return;
+    }
+    
+    // Check if it's a valid URL
+    if (!tab.url || !tab.url.startsWith('http')) {
+      dialog.confirm({
+        title: 'Invalid Page',
+        body: 'Recording only works on web pages (http/https).',
+        onlyOk: true,
+      });
+      return;
+    }
+    
+    // Prompt for workflow name BEFORE starting recording
+    dialog.prompt({
+      title: t('recording.title') || 'New Recording',
+      placeholder: t('common.name') || 'Workflow name',
+      okText: t('common.start') || 'Start Recording',
+      inputValue: 'New Recording',
+      onConfirm: async (workflowName) => {
+        if (!workflowName.trim()) {
+          dialog.confirm({
+            title: 'Name Required',
+            body: 'Please enter a workflow name.',
+            onlyOk: true,
+          });
+          return;
+        }
+        
+        // Set recording state with the workflow name
+        await browser.storage.local.set({ 
+          isRecording: true,
+          recording: { 
+            flows: [], 
+            name: workflowName,
+            description: ''
+          }
+        });
+        
+        // Inject recording script
+        await sendMessage('inject:recordWorkflow', { tabId: tab.id }, 'background');
+        
+        isRecording.value = true;
+        
+        // Open dashboard to show recording page
+        await sendMessage('open:dashboard', '/recording', 'background');
+        
+        window.close();
+      },
+    });
+  } catch (error) {
+    console.error('Failed to start recording:', error);
+    dialog.confirm({
+      title: 'Recording Failed',
+      body: 'Failed to start recording. Please try again.',
+      onlyOk: true,
+      okVariant: 'danger',
+    });
+  }
+};
+
+const stopRecording = async () => {
+  try {
+    // Just open the recording page which handles the stop
+    await sendMessage('open:dashboard', '/recording', 'background');
+    window.close();
+  } catch (error) {
+    console.error('Failed to open recording page:', error);
+  }
+};
+
 watch(
   () => [sortState.by, sortState.order, state.activeFolder],
   ([sortBy, sortOrder, activeFolder]) => {
@@ -389,6 +478,17 @@ watch(
 );
 
 onMounted(async () => {
+  // Check recording state
+  const { isRecording: recording } = await browser.storage.local.get('isRecording');
+  isRecording.value = recording || false;
+  
+  // If recording is active, redirect to the recording page
+  if (isRecording.value) {
+    await sendMessage('open:dashboard', '/recording', 'background');
+    window.close();
+    return;
+  }
+  
   const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
   state.haveAccess = /^(https?)/.test(tab.url);
 
@@ -421,5 +521,23 @@ onMounted(async () => {
 <style>
 .recording-card {
   transition: height 300ms cubic-bezier(0.4, 0, 0.2, 1) !important;
+}
+
+/* Recording button styles */
+.recording-btn:hover {
+  background-color: rgba(239, 68, 68, 0.1) !important;
+}
+
+.animate-pulse {
+  animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
 }
 </style>

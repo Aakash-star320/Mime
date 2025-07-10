@@ -76,6 +76,30 @@ async function handleScheduleBackup() {
 }
 
 class BackgroundEventsListeners {
+  static async onWebNavigationCommitted(details) {
+    if (details.frameId !== 0) return;
+    
+    const { isRecording, recording } = await browser.storage.local.get(['isRecording', 'recording']);
+    
+    if (!isRecording || !recording) return;
+    
+    // Check if this is a user-initiated navigation (typed in address bar)
+    if (details.transitionType === 'typed' || details.transitionType === 'auto_bookmark') {
+      recording.flows.push({
+        id: 'javascript-code',
+        description: 'Navigate to URL',
+        data: {
+          code: `window.location.href = "${details.url}";\nautomaNextBlock();`,
+          timeout: 5000,
+          context: 'website',
+          everyNewTab: false
+        }
+      });
+      
+      await browser.storage.local.set({ recording });
+    }
+  }
+
   static onActionClicked() {
     BackgroundUtils.openDashboard();
   }

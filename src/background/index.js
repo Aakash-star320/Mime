@@ -5,6 +5,7 @@ import { useUserStore } from '@/stores/user';
 import getFile, { readFileAsBase64 } from '@/utils/getFile';
 import { sleep } from '@/utils/helper';
 import { MessageListener } from '@/utils/message';
+import { nanoid } from 'nanoid';
 
 // import { getDocumentCtx } from '@/content/handleSelector';
 import { automaRefDataStr } from '@/workflowEngine/helper';
@@ -18,6 +19,10 @@ import BackgroundUtils from './BackgroundUtils';
 import BackgroundWorkflowUtils from './BackgroundWorkflowUtils';
 
 BackgroundOffscreen.instance.sendMessage('halo');
+
+browser.webNavigation.onCommitted.addListener(
+  BackgroundEventsListeners.onWebNavigationCommitted
+);
 
 browser.alarms.onAlarm.addListener(BackgroundEventsListeners.onAlarms);
 
@@ -411,6 +416,236 @@ message.on(
     }
   }
 );
+
+// Add handler to inject recording script
+// Replace the existing handler with this improved version
+message.on('inject:recordWorkflow', async ({ tabId }) => {
+  try {
+    // First check if content script is ready
+    const contentScriptReady = await browser.tabs.sendMessage(tabId, {
+      type: 'content-script-exists'
+    }).catch(() => false);
+    
+    if (!contentScriptReady) {
+      throw new Error('Content script not ready');
+    }
+    
+    // For MV3, use scripting API
+    if (browser.scripting) {
+      await browser.scripting.executeScript({
+        target: { tabId },
+        files: ['recordWorkflow.bundle.js']
+      });
+    } else {
+      // For MV2
+      await browser.tabs.executeScript(tabId, {
+        file: 'recordWorkflow.bundle.js'
+      });
+    }
+    
+    return { success: true };
+  } catch (error) {
+    console.error('Failed to inject recording script:', error);
+    throw error;
+  }
+});
+
+// Add handler to save recording as workflow
+message.on('recording:save', async ({ recording, name }) => {
+  try {
+    // Convert recording to Automa workflow format
+    const workflow = convertRecordingToWorkflow(recording, name);
+    
+    // Save workflow
+    const { workflows } = await browser.storage.local.get('workflows');
+    const workflowsObj = workflows || {};
+    workflowsObj[workflow.id] = workflow;
+    await browser.storage.local.set({ workflows: workflowsObj });
+    
+    // Open dashboard to show new workflow
+    await BackgroundUtils.openDashboard(`/workflows/${workflow.id}`);
+    
+    return { success: true, workflowId: workflow.id };
+  } catch (error) {
+    console.error('Failed to save recording:', error);
+    throw error;
+  }
+});
+
+// Helper function to convert recording to workflow format
+// Helper function to convert recording to workflow format
+// Helper function to convert recording to workflow format
+function convertRecordingToWorkflow(recording, name) {
+  const nodes = [];
+  const edges = [];
+  
+  // Add trigger node (required for all Automa workflows)
+  const triggerId = 'trigger-' + nanoid(8);
+  nodes.push({
+    id: triggerId,
+    label: 'trigger',
+    position: { x: 252, y: 68 },
+    data: {},
+    type: 'BlockBasic'
+  });
+  
+  // Add active-tab node right after trigger
+  const activeTabId = 'active-tab-' + nanoid(8);
+  nodes.push({
+    id: activeTabId,
+    label: 'active-tab',
+    position: { x: 252, y: 188 },
+    data: {},
+    type: 'BlockBasic'
+  });
+  
+  // Create edge from trigger to active-tab
+  edges.push({
+    id: `${triggerId}-${activeTabId}`,
+    source: triggerId,
+    target: activeTabId,
+    sourceHandle: `${triggerId}-output-1`,
+    targetHandle: `${activeTabId}-input-1`
+  });
+  
+  // Convert each recorded action to a workflow node
+  let prevNodeId = activeTabId;  // Start from active-tab instead of trigger
+  let yPosition = 308;  // Start position after active-tab
+  
+  // Group consecutive press-key actions
+  const processedFlows = [];
+  let keyGroup = null;
+  
+  recording.flows.forEach((flow, index) => {
+    if (flow.id === 'press-key' && flow.groupId) {
+      if (!keyGroup || keyGroup.groupId !== flow.groupId) {
+        if (keyGroup) processedFlows.push(keyGroup);
+        keyGroup = {
+          id: 'press-key',
+          groupId: flow.groupId,
+          keys: [flow.data.keys],
+          selector: flow.data.selector,
+          data: flow.data
+        };
+      } else {
+        keyGroup.keys.push(flow.data.keys);
+      }
+    } else {
+      if (keyGroup) {
+        // Merge keys into a single press-key action
+        keyGroup.data.keys = keyGroup.keys.join('+');
+        processedFlows.push(keyGroup);
+        keyGroup = null;
+      }
+      processedFlows.push(flow);
+    }
+  });
+  if (keyGroup) {
+    keyGroup.data.keys = keyGroup.keys.join('+');
+    processedFlows.push(keyGroup);
+  }
+  
+  processedFlows.forEach((flow, index) => {
+    const nodeId = flow.itemId || `node-${nanoid(8)}`;
+    let nodeLabel = flow.id;
+    let nodeData = flow.data || {};
+    
+    // Special handling for javascript-code blocks
+    if (flow.id === 'javascript-code') {
+      nodeLabel = 'javascript-code';
+      nodeData = {
+        code: flow.data.code || '',
+        timeout: flow.data.timeout || 5000,
+        context: flow.data.context || 'website',
+        everyNewTab: flow.data.everyNewTab || false
+      };
+    }
+    // Ensure forms blocks have proper data
+    else if (flow.id === 'forms') {
+      nodeData = {
+        ...nodeData,
+        selector: nodeData.selector || '',
+        value: nodeData.value || '',
+        delay: nodeData.delay || 100,
+        clearValue: nodeData.clearValue !== false,
+        type: nodeData.type || 'text-field',
+        waitForSelector: nodeData.waitForSelector !== false,
+        waitSelectorTimeout: nodeData.waitSelectorTimeout || 5000
+      };
+    }
+    // Ensure event-click blocks have proper data
+    else if (flow.id === 'event-click') {
+      nodeData = {
+        ...nodeData,
+        selector: nodeData.selector || '',
+        waitForSelector: nodeData.waitForSelector !== false,
+        waitSelectorTimeout: nodeData.waitSelectorTimeout || 5000
+      };
+    }
+    // Ensure press-key blocks have proper data
+    else if (flow.id === 'press-key') {
+      nodeData = {
+        ...nodeData,
+        keys: nodeData.keys || '',
+        selector: nodeData.selector || '',
+        delay: nodeData.delay || 0
+      };
+    }
+    
+    // Create the node
+    nodes.push({
+      id: nodeId,
+      label: nodeLabel,
+      position: { x: 252, y: yPosition },
+      data: nodeData,
+      type: 'BlockBasic'
+    });
+    
+    // Create edge connecting to previous node
+    edges.push({
+      id: `${prevNodeId}-${nodeId}`,
+      source: prevNodeId,
+      target: nodeId,
+      sourceHandle: `${prevNodeId}-output-1`,
+      targetHandle: `${nodeId}-input-1`
+    });
+    
+    prevNodeId = nodeId;
+    yPosition += 120;
+  });
+  
+  // Return Automa workflow structure
+  return {
+    id: nanoid(),
+    name: name || 'Recorded Workflow',
+    icon: 'riRecordCircleLine',
+    drawflow: {
+      nodes,
+      edges,
+      position: [0, 0],
+      zoom: 1,
+      viewport: { x: 0, y: 0, zoom: 1 }
+    },
+    table: [],
+    dataColumns: [],
+    settings: {
+      publicId: '',
+      blockDelay: 0,
+      saveLog: true,
+      debugMode: false,
+      notification: true,
+      execContext: 'popup',
+      reuseLastState: false,
+      onError: 'stop-workflow',
+      tabLoadTimeout: 30000,
+      executedBlockOnWeb: false
+    },
+    version: '1.29.9',
+    createdAt: Date.now(),
+    isDisabled: false,
+    trigger: null
+  };
+}
 
 const getAutomaScript = ({ varName, refData, everyNewTab, isEval = false }) => {
   let str = `
