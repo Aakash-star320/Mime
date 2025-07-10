@@ -16,6 +16,7 @@ let parameterMode = false;
 let parameterStartIndex = -1;
 let parameterFieldSelector = null;
 let parameterAlreadyRecorded = false; // Only allow one parameter per recording
+let parameterOriginalValue = ''; // Store original value to restore
 
 const isAutomaInstance = (target) =>
   target.id === 'automa-recording' ||
@@ -194,9 +195,8 @@ async function onKeydown(event) {
 
   const isTextField = isTextFieldEl(event.target);
   
-  // F4 key detection for parameters
   // Ctrl+Alt+P key detection for parameters
-if (event.key === 'p' && event.ctrlKey && event.altKey && isTextField && !event.metaKey && !event.shiftKey) {
+  if (event.key === 'p' && event.ctrlKey && event.altKey && isTextField && !event.metaKey && !event.shiftKey) {
     event.preventDefault();
     event.stopPropagation();
     
@@ -218,6 +218,7 @@ if (event.key === 'p' && event.ctrlKey && event.altKey && isTextField && !event.
       parameterMode = true;
       parameterStartIndex = event.target.selectionStart;
       parameterFieldSelector = findSelector(event.target);
+      parameterOriginalValue = event.target.value; // Store original value
       
       // Visual feedback - green outline
       event.target.style.outline = '3px solid #10b981';
@@ -230,16 +231,17 @@ if (event.key === 'p' && event.ctrlKey && event.altKey && isTextField && !event.
       // End parameter mode
       parameterMode = false;
       const paramEnd = event.target.selectionStart;
-      const value = event.target.value;
-      const paramName = value.substring(parameterStartIndex, paramEnd);
+      const currentValue = event.target.value;
+      const paramName = currentValue.substring(parameterStartIndex, paramEnd);
       
-      // Replace the parameter text with Automa syntax
-      const newValue = 
-        value.substring(0, parameterStartIndex) + 
+      // Create the value with parameter for saving to workflow
+      const valueForWorkflow = 
+        parameterOriginalValue.substring(0, parameterStartIndex) + 
         `{{parameter}}` + 
-        value.substring(paramEnd);
+        parameterOriginalValue.substring(paramEnd);
       
-      event.target.value = newValue;
+      // Keep the original user-entered value in the input field (don't change what user sees)
+      // event.target.value remains unchanged
       
       // Remove visual feedback
       event.target.style.outline = '';
@@ -248,18 +250,42 @@ if (event.key === 'p' && event.ctrlKey && event.altKey && isTextField && !event.
       // Mark parameter as recorded
       parameterAlreadyRecorded = true;
       
-      console.log('Parameter created: {{parameter}}');
+      console.log('Parameter created for workflow: {{parameter}}');
+      console.log('User sees in field:', currentValue);
+      console.log('Workflow will save:', valueForWorkflow);
       
-      // Update the recorded value
+      // Update the recorded value in workflow
       addBlock((recording) => {
         // Find the last forms block for this field
+        let foundBlock = false;
         for (let i = recording.flows.length - 1; i >= 0; i--) {
           const flow = recording.flows[i];
           if (flow.id === 'forms' && flow.data.selector === parameterFieldSelector) {
-            flow.data.value = newValue;
+            flow.data.value = valueForWorkflow; // Save {{parameter}} version
+            foundBlock = true;
             break;
           }
         }
+        
+        // If no existing Forms block found, create a new one
+        if (!foundBlock) {
+          const elementName = (event.target.ariaLabel || event.target.name || '').slice(0, 12);
+          const newBlock = {
+            id: 'forms',
+            data: {
+              selector: parameterFieldSelector,
+              delay: 100,
+              clearValue: true,
+              type: 'text-field',
+              value: valueForWorkflow, // Save {{parameter}} version
+              waitForSelector: true,
+              description: `Text field (${elementName})`,
+            },
+          };
+          recording.flows.push(newBlock);
+          return newBlock;
+        }
+        
         return null;
       });
       
@@ -559,6 +585,7 @@ export function cleanUp() {
   userNavigatedToUrl = false;
   activeTabAdded = false;
   parameterAlreadyRecorded = false;
+  parameterOriginalValue = '';
 }
 
 export default async function (mainFrame) {
