@@ -186,6 +186,9 @@
   </div>
 </template>
 <script setup>
+import { nanoid } from 'nanoid';
+import defu from 'defu';
+import { tasks } from '@/utils/shared';
 import BackgroundUtils from '@/background/BackgroundUtils';
 import HomeTeamWorkflows from '@/components/popup/home/HomeTeamWorkflows.vue';
 import HomeWorkflowCard from '@/components/popup/home/HomeWorkflowCard.vue';
@@ -214,6 +217,179 @@ const folderStore = useFolderStore();
 const workflowStore = useWorkflowStore();
 const teamWorkflowStore = useTeamWorkflowStore();
 const hostedWorkflowStore = useHostedWorkflowStore();
+
+async function saveRecordingAsWorkflow(recording) {
+  try {
+    const { nanoid } = await import('nanoid');
+    const { tasks } = await import('@/utils/shared');
+    const defu = (await import('defu')).default;
+    
+    // Generate workflow structure (similar to Recording.vue logic)
+    let nextNodeId = nanoid();
+    const triggerId = nanoid();
+    let prevNodeId = triggerId;
+
+    const nodes = [];
+    const edges = [];
+
+    const addEdge = (data = {}) => {
+      edges.push({
+        ...data,
+        id: nanoid(),
+        class: `source-${data.sourceHandle} target-${data.targetHandle}`,
+      });
+    };
+
+    // Add trigger node
+    nodes.push({
+      position: { x: 252, y: 68 },
+      id: triggerId,
+      label: 'trigger',
+      type: 'BlockBasic',
+      data: tasks.trigger.data,
+    });
+
+    // Add active-tab node
+    const activeTabId = nanoid();
+    nodes.push({
+      position: { x: 252, y: 188 },
+      id: activeTabId,
+      label: 'active-tab',
+      type: 'BlockBasic',
+      data: tasks['active-tab'].data,
+    });
+
+    // Edge from trigger to active-tab
+    addEdge({
+      source: triggerId,
+      target: activeTabId,
+      targetHandle: `${activeTabId}-input-1`,
+      sourceHandle: `${triggerId}-output-1`,
+    });
+
+    prevNodeId = activeTabId;
+    let yPosition = 308;
+
+    // Process recorded flows
+    const groups = {};
+    
+    recording.flows.forEach((block, index) => {
+      if (block.groupId) {
+        if (!groups[block.groupId]) groups[block.groupId] = [];
+
+        groups[block.groupId].push({
+          id: block.id,
+          itemId: nanoid(),
+          data: defu(block.data, tasks[block.id].data),
+        });
+
+        const nextNodeInGroup = recording.flows[index + 1]?.groupId;
+        if (nextNodeInGroup) return;
+
+        block.id = 'blocks-group';
+        block.data = { blocks: groups[block.groupId] };
+        delete groups[block.groupId];
+      }
+
+      const nodeId = nanoid();
+      const node = {
+        id: nodeId,
+        label: block.id,
+        type: tasks[block.id].component,
+        data: defu(block.data, tasks[block.id].data),
+        position: { x: 252, y: yPosition },
+      };
+
+      addEdge({
+        source: prevNodeId,
+        target: nodeId,
+        targetHandle: `${nodeId}-input-1`,
+        sourceHandle: `${prevNodeId}-output-1`,
+      });
+
+      prevNodeId = nodeId;
+      yPosition += 120;
+      nodes.push(node);
+    });
+
+    // Create workflow
+    const workflowData = {
+      name: recording.name,
+      description: recording.description || '',
+      drawflow: {
+        nodes,
+        edges,
+        position: [0, 0],
+        zoom: 1.3,
+        viewport: { x: 0, y: 0, zoom: 1.3 }
+      },
+      table: [],
+      dataColumns: [],
+      settings: {
+        publicId: '',
+        blockDelay: 0,
+        saveLog: true,
+        debugMode: false,
+        notification: true,
+        execContext: 'popup',
+        reuseLastState: false,
+        onError: 'stop-workflow',
+        tabLoadTimeout: 30000,
+        executedBlockOnWeb: false
+      },
+      createdAt: Date.now(),
+      isDisabled: false
+    };
+
+    // Save workflow
+    const insertedWorkflows = await workflowStore.insert(workflowData);
+    const workflowId = Object.keys(insertedWorkflows)[0];
+    
+    console.log('Workflow saved with ID:', workflowId);
+    return workflowId;
+    
+  } catch (error) {
+    console.error('Failed to save workflow:', error);
+    throw error;
+  }
+}
+
+// Helper function to save command to API
+async function saveCommandToAPI(commandData) {
+  try {
+    const { user } = await browser.storage.local.get('user');
+    const userId = user?.id || 'default_user';
+    
+    console.log('Saving command to API:', commandData);
+    
+    const response = await fetch('http://localhost:8000/save-command', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        user_id: userId,
+        command_name: commandData.command_name,
+        has_parameter: commandData.has_parameter,
+        parameter_name: commandData.parameter_name,
+        workflow_id: commandData.workflow_id
+      }),
+    });
+    
+    const result = await response.json();
+    
+    if (!response.ok || !result.success) {
+      throw new Error(result.error || 'Failed to save command');
+    }
+    
+    console.log('Command saved successfully:', result);
+    return result;
+  } catch (error) {
+    console.error('Failed to save command to API:', error);
+    // Don't throw - let workflow save continue even if API fails
+    return null;
+  }
+}
 
 useGroupTooltip();
 
@@ -409,7 +585,7 @@ const startRecording = async () => {
       return;
     }
     
-    // Prompt for workflow name BEFORE starting recording
+    // Prompt for workflow name
     dialog.prompt({
       title: t('recording.title') || 'New Recording',
       placeholder: t('common.name') || 'Workflow name',
@@ -425,45 +601,202 @@ const startRecording = async () => {
           return;
         }
         
-        // Set recording state with the workflow name
-        await browser.storage.local.set({ 
-          isRecording: true,
-          recording: { 
-            flows: [], 
-            name: workflowName,
-            description: ''
+        try {
+          // Step 1: Inject content script if needed
+          let contentScriptReady = false;
+          try {
+            contentScriptReady = await browser.tabs.sendMessage(tab.id, {
+              type: 'content-script-exists'
+            });
+          } catch (error) {
+            console.log('Content script not ready, injecting...');
           }
-        });
-        
-        // Inject recording script
-        await sendMessage('inject:recordWorkflow', { tabId: tab.id }, 'background');
-        
-        isRecording.value = true;
-        
-        // Open dashboard to show recording page
-        await sendMessage('open:dashboard', '/recording', 'background');
-        
-        window.close();
+          
+          if (!contentScriptReady) {
+            if (browser.scripting) {
+              await browser.scripting.executeScript({
+                target: { tabId: tab.id, allFrames: true },
+                files: ['contentScript.bundle.js']
+              });
+            } else {
+              await browser.tabs.executeScript(tab.id, {
+                file: 'contentScript.bundle.js',
+                allFrames: true
+              });
+            }
+            
+            // Wait for content script to initialize
+            await new Promise(resolve => setTimeout(resolve, 1000));
+          }
+          
+          // Step 2: Set recording state
+          await browser.storage.local.set({ 
+            isRecording: true,
+            recording: { 
+              flows: [], 
+              name: workflowName,
+              description: ''
+            }
+          });
+          
+          // Step 3: Inject recording script into current tab
+          if (browser.scripting) {
+            await browser.scripting.executeScript({
+              target: { tabId: tab.id, allFrames: true },
+              files: ['recordWorkflow.bundle.js']
+            });
+          } else {
+            await browser.tabs.executeScript(tab.id, {
+              file: 'recordWorkflow.bundle.js',
+              allFrames: true
+            });
+          }
+          
+          // Step 4: Set UI state and badge
+          isRecording.value = true;
+          
+          await (browser.action || browser.browserAction).setBadgeBackgroundColor({
+            color: '#ef4444',
+          });
+          await (browser.action || browser.browserAction).setBadgeText({
+            text: 'rec',
+          });
+          
+          console.log('Recording started successfully');
+          
+          // Don't close popup, let user see recording status
+          
+        } catch (error) {
+          console.error('Failed to start recording:', error);
+          
+          // Reset state on error
+          await browser.storage.local.remove(['isRecording', 'recording']);
+          isRecording.value = false;
+          
+          dialog.confirm({
+            title: 'Recording Failed',
+            body: `Failed to start recording: ${error.message}`,
+            onlyOk: true,
+            okVariant: 'danger',
+          });
+        }
       },
     });
   } catch (error) {
     console.error('Failed to start recording:', error);
-    dialog.confirm({
-      title: 'Recording Failed',
-      body: 'Failed to start recording. Please try again.',
-      onlyOk: true,
-      okVariant: 'danger',
-    });
   }
 };
 
 const stopRecording = async () => {
   try {
-    // Just open the recording page which handles the stop
-    await sendMessage('open:dashboard', '/recording', 'background');
-    window.close();
+    // Get current recording data
+    const { recording } = await browser.storage.local.get('recording');
+    
+    if (!recording) {
+      console.log('No recording data found');
+      isRecording.value = false;
+      return;
+    }
+    
+    // Stop recording immediately
+    await browser.storage.local.remove(['isRecording', 'recording']);
+    await (browser.action || browser.browserAction).setBadgeText({ text: '' });
+    
+    // Update UI state
+    isRecording.value = false;
+    
+    // Send stop message to all tabs to clean up recording scripts
+    const tabs = await browser.tabs.query({});
+    const httpTabs = tabs.filter(tab => tab.url && tab.url.startsWith('http'));
+    
+    await Promise.allSettled(
+      httpTabs.map(tab => 
+        browser.tabs.sendMessage(tab.id, { type: 'recording:stop' })
+          .catch(error => console.log('Tab cleanup failed:', tab.id, error.message))
+      )
+    );
+    
+    // If there are recorded flows, save as workflow
+    if (recording.flows && recording.flows.length > 0) {
+      // Check if recording has parameters
+      const hasParameter = recording.flows.some(flow => 
+        flow.id === 'forms' && 
+        flow.data?.value?.includes('{{parameter}}')
+      );
+      
+      // Generate workflow
+      const workflowId = await saveRecordingAsWorkflow(recording);
+      
+      if (hasParameter && workflowId) {
+        // Prompt for parameter name
+        dialog.prompt({
+          title: 'Parameter Configuration',
+          placeholder: 'Enter parameter name (e.g., "search query", "username")',
+          okText: 'Save Command',
+          onConfirm: async (parameterName) => {
+            if (parameterName?.trim()) {
+              // Save to API
+              await saveCommandToAPI({
+                workflow_id: workflowId,
+                command_name: recording.name,
+                has_parameter: true,
+                parameter_name: parameterName.trim()
+              });
+            }
+            
+            // Show success message
+            dialog.confirm({
+              title: 'Recording Saved',
+              body: `Workflow "${recording.name}" has been saved successfully!`,
+              onlyOk: true,
+            });
+          },
+          onCancel: () => {
+            dialog.confirm({
+              title: 'Recording Saved',
+              body: `Workflow "${recording.name}" has been saved successfully!`,
+              onlyOk: true,
+            });
+          }
+        });
+      } else {
+        // No parameter - just save
+        if (workflowId) {
+          await saveCommandToAPI({
+            workflow_id: workflowId,
+            command_name: recording.name,
+            has_parameter: false,
+            parameter_name: null
+          });
+        }
+        
+        dialog.confirm({
+          title: 'Recording Saved',
+          body: `Workflow "${recording.name}" has been saved successfully!`,
+          onlyOk: true,
+        });
+      }
+    } else {
+      // No flows recorded
+      dialog.confirm({
+        title: 'Recording Stopped',
+        body: 'Recording stopped. No actions were recorded.',
+        onlyOk: true,
+      });
+    }
+    
+    console.log('Recording stopped successfully');
+    
   } catch (error) {
-    console.error('Failed to open recording page:', error);
+    console.error('Failed to stop recording:', error);
+    isRecording.value = false;
+    
+    dialog.confirm({
+      title: 'Error',
+      body: `Failed to stop recording: ${error.message}`,
+      onlyOk: true,
+      okVariant: 'danger',
+    });
   }
 };
 
@@ -477,46 +810,71 @@ watch(
   }
 );
 
+// Add this to your Home.vue onMounted function - IMPROVED recording state check
+
 onMounted(async () => {
-  // Check recording state
-  const { isRecording: recording } = await browser.storage.local.get('isRecording');
-  isRecording.value = recording || false;
-  
-  // If recording is active, redirect to the recording page
-  if (isRecording.value) {
-    await sendMessage('open:dashboard', '/recording', 'background');
-    window.close();
-    return;
-  }
-  
-  const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
-  state.haveAccess = /^(https?)/.test(tab.url);
+  try {
+    // Check recording state FIRST
+    const { isRecording: recording } = await browser.storage.local.get('isRecording');
+    console.log('Current recording state:', recording);
+    
+    isRecording.value = recording || false;
+    
+    // If recording is active, check if recording page is already open
+    if (isRecording.value) {
+      const tabs = await browser.tabs.query({
+        url: browser.runtime.getURL('/newtab.html')
+      });
+      
+      const recordingTab = tabs.find(tab => tab.url.includes('#/recording') || tab.url.includes('/recording'));
+      
+      if (recordingTab) {
+        // Recording page is already open, just focus it
+        await browser.tabs.update(recordingTab.id, { active: true });
+        await browser.windows.update(recordingTab.windowId, { focused: true });
+      } else {
+        // Open recording page
+        await sendMessage('open:dashboard', '/recording', 'background');
+      }
+      
+      window.close();
+      return;
+    }
+    
+    // Rest of your existing onMounted code...
+    const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+    state.haveAccess = /^(https?)/.test(tab?.url || '');
 
-  const storage = await browser.storage.local.get('pinnedWorkflows');
-  state.pinnedWorkflows = storage.pinnedWorkflows || [];
+    const storage = await browser.storage.local.get('pinnedWorkflows');
+    state.pinnedWorkflows = storage.pinnedWorkflows || [];
 
-  await folderStore.load();
-  await userStore.loadUser({ storage: localStorage, ttl: 1000 * 60 * 5 });
-  await teamWorkflowStore.loadData();
+    await folderStore.load();
+    await userStore.loadUser({ storage: localStorage, ttl: 1000 * 60 * 5 });
+    await teamWorkflowStore.loadData();
 
-  let activeTab = localStorage.getItem('popup-tab') || 'local';
+    let activeTab = localStorage.getItem('popup-tab') || 'local';
 
-  await automa('app');
+    await automa('app');
 
-  if (activeTab === 'team' && !userStore.user?.teams) activeTab = 'local';
-  else if (activeTab === 'host' && hostedWorkflowStore.toArray.length < 1)
-    activeTab = 'local';
+    if (activeTab === 'team' && !userStore.user?.teams) activeTab = 'local';
+    else if (activeTab === 'host' && hostedWorkflowStore.toArray.length < 1)
+      activeTab = 'local';
 
-  state.retrieved = true;
-  state.activeTab = activeTab;
+    state.retrieved = true;
+    state.activeTab = activeTab;
 
-  if (state.activeFolder) {
-    const folderExist = folderStore.items.some(
-      (folder) => folder.id === state.activeFolder
-    );
-    if (!folderExist) state.activeFolder = '';
+    if (state.activeFolder) {
+      const folderExist = folderStore.items.some(
+        (folder) => folder.id === state.activeFolder
+      );
+      if (!folderExist) state.activeFolder = '';
+    }
+  } catch (error) {
+    console.error('Error in onMounted:', error);
+    state.retrieved = true;
   }
 });
+
 </script>
 <style>
 .recording-card {

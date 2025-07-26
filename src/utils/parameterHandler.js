@@ -1,5 +1,4 @@
-// Add this to your workflow execution handler
-// This should be added to your workflow execution handler
+//This is modified parameterHandler.js file in Mime
 
 export function replaceParametersInWorkflow(workflowData, parameterValues) {
   // Clone the workflow to avoid mutating the original

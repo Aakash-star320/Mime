@@ -1,3 +1,5 @@
+<!-- This is the modified Recording.vue file in Mime -->
+
 <template>
   <div class="mx-auto w-full max-w-xl p-5">
     <div class="flex items-center">
@@ -172,14 +174,24 @@ function generateDrawflow(startBlock, startBlockData) {
     nodes,
   };
 }
+
 async function stopRecording() {
   if (state.isGenerating) return;
 
   try {
     state.isGenerating = true;
 
+    // Check if recording has parameters BEFORE saving
+    const hasParameter = state.flows.some(flow => 
+      flow.id === 'forms' && 
+      flow.data?.value?.includes('{{parameter}}')
+    );
+
     if (state.flows.length !== 0) {
+      let savedWorkflowId = null;
+      
       if (state.workflowId) {
+        // UPDATE existing workflow
         const workflow = workflowStore.getById(state.workflowId);
         const startBlock = workflow.drawflow.nodes.find(
           (node) => node.id === state.connectFrom.id
@@ -196,43 +208,167 @@ async function stopRecording() {
           id: state.workflowId,
           data: { drawflow },
         });
+        
+        savedWorkflowId = state.workflowId;
       } else {
+        // CREATE new workflow
         const drawflow = generateDrawflow();
 
-        await workflowStore.insert({
+        const insertedWorkflows = await workflowStore.insert({
           drawflow,
           name: state.name,
           description: state.description ?? '',
         });
+        
+        // Get the ID of the newly created workflow
+        savedWorkflowId = Object.keys(insertedWorkflows)[0];
       }
-    }
 
-    await browser.storage.local.remove(['isRecording', 'recording']);
-    await (browser.action || browser.browserAction).setBadgeText({ text: '' });
-
-    const tabs = (await browser.tabs.query({})).filter((tab) =>
-      tab.url.startsWith('http')
-    );
-    Promise.allSettled(
-      tabs.map(({ id }) =>
-        browser.tabs.sendMessage(id, { type: 'recording:stop' })
-      )
-    );
-
-    state.isGenerating = false;
-
-    if (state.workflowId) {
-      router.replace(
-        `/workflows/${state.workflowId}?blockId=${state.connectFrom.id}`
-      );
+      // NEW CODE: Handle parameter and API save
+      if (savedWorkflowId) {
+        if (hasParameter) {
+          // Use Vue's dialog system that's already imported
+          const { useDialog } = await import('@/composable/dialog');
+          const dialog = useDialog();
+          
+          dialog.prompt({
+            title: 'Parameter Configuration',
+            placeholder: 'Enter parameter name (e.g., "search query", "username")',
+            okText: 'Save Command',
+            onConfirm: async (parameterName) => {
+              if (parameterName?.trim()) {
+                // Save to API
+                await saveCommandToAPI({
+                  workflow_id: savedWorkflowId,
+                  command_name: state.name,
+                  has_parameter: true,
+                  parameter_name: parameterName.trim()
+                });
+              }
+              // Continue with navigation
+              navigateAfterSave(savedWorkflowId);
+            },
+            onCancel: () => {
+              // Still navigate even if cancelled
+              navigateAfterSave(savedWorkflowId);
+            }
+          });
+          
+          // Don't navigate yet - wait for dialog
+          return;
+        } else {
+          // No parameter - save and navigate
+          await saveCommandToAPI({
+            workflow_id: savedWorkflowId,
+            command_name: state.name,
+            has_parameter: false,
+            parameter_name: null
+          });
+        }
+        
+        navigateAfterSave(savedWorkflowId);
+      }
     } else {
-      router.replace('/');
+      // No flows recorded
+      navigateAfterSave(null);
     }
   } catch (error) {
     state.isGenerating = false;
     console.error(error);
   }
 }
+
+// NEW FUNCTION: Add this after stopRecording
+async function navigateAfterSave(workflowId) {
+  await browser.storage.local.remove(['isRecording', 'recording']);
+  await (browser.action || browser.browserAction).setBadgeText({ text: '' });
+
+  const tabs = (await browser.tabs.query({})).filter((tab) =>
+    tab.url.startsWith('http')
+  );
+  Promise.allSettled(
+    tabs.map(({ id }) =>
+      browser.tabs.sendMessage(id, { type: 'recording:stop' })
+    )
+  );
+
+  state.isGenerating = false;
+
+  if (state.workflowId) {
+    router.replace(
+      `/workflows/${state.workflowId}?blockId=${state.connectFrom.id}`
+    );
+  } else if (workflowId) {
+    router.replace(`/workflows/${workflowId}`);
+  } else {
+    router.replace('/');
+  }
+}
+
+// REPLACE the saveCommandToAPI function
+async function saveCommandToAPI(commandData) {
+  try {
+    // Get user ID from storage
+    const { user } = await browser.storage.local.get('user');
+    const userId = user?.id || 'default_user';
+    
+    console.log('Saving command to API:', commandData);
+    
+    const response = await fetch('http://localhost:8000/save-command', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        user_id: userId,
+        command_name: commandData.command_name,
+        has_parameter: commandData.has_parameter,
+        parameter_name: commandData.parameter_name,
+        workflow_id: commandData.workflow_id
+      }),
+    });
+    
+    const result = await response.json();
+    
+    if (!response.ok || !result.success) {
+      throw new Error(result.error || 'Failed to save command');
+    }
+    
+    console.log('Command saved successfully:', result);
+    
+    // Save command reference locally too
+    const { savedCommands = [] } = await browser.storage.local.get('savedCommands');
+    savedCommands.push({
+      ...commandData,
+      user_id: userId,
+      api_id: result.id,
+      created_at: Date.now()
+    });
+    await browser.storage.local.set({ savedCommands });
+    
+    // Show success notification
+    const notification = document.createElement('div');
+    notification.className = 'fixed top-4 right-4 bg-green-500 text-white px-6 py-3 rounded-lg shadow-lg z-50';
+    notification.textContent = 'Command saved successfully!';
+    document.body.appendChild(notification);
+    setTimeout(() => notification.remove(), 3000);
+    
+    return result;
+  } catch (error) {
+    console.error('Failed to save command to API:', error);
+    
+    // Show error notification
+    const notification = document.createElement('div');
+    notification.className = 'fixed top-4 right-4 bg-red-500 text-white px-6 py-3 rounded-lg shadow-lg z-50';
+    notification.textContent = 'Failed to save command. Make sure the API server is running.';
+    document.body.appendChild(notification);
+    setTimeout(() => notification.remove(), 3000);
+    
+    // Don't throw - let workflow save continue even if API fails
+    return null;
+  }
+}
+
 function removeBlock(index) {
   state.flows.splice(index, 1);
 
@@ -244,6 +380,7 @@ function onStorageChanged({ recording }) {
   Object.assign(state, recording.newValue);
 }
 
+
 onMounted(async () => {
   const { recording, isRecording } = await browser.storage.local.get([
     'recording',
@@ -254,6 +391,7 @@ onMounted(async () => {
 
   window.stopRecording = stopRecording;
 
+  // Add event listeners
   browser.storage.onChanged.addListener(onStorageChanged);
   browser.tabs.onCreated.addListener(browserEvents.onTabCreated);
   browser.tabs.onActivated.addListener(browserEvents.onTabsActivated);
@@ -262,8 +400,49 @@ onMounted(async () => {
     browserEvents.onWebNavigationCompleted
   );
 
+  // Set the recording state
   Object.assign(state, recording);
+
+  // Now inject the recording script into all active tabs
+  try {
+    const tabs = await browser.tabs.query({ url: 'http://*/*' });
+    const httpsTab = await browser.tabs.query({ url: 'https://*/*' });
+    const allTabs = [...tabs, ...httpsTab];
+    
+    console.log('Injecting recording script into', allTabs.length, 'tabs');
+    
+    // Inject recording script into all valid tabs
+    for (const tab of allTabs) {
+      try {
+        // Check if content script exists first
+        const exists = await browser.tabs.sendMessage(tab.id, {
+          type: 'content-script-exists'
+        }).catch(() => false);
+        
+        if (exists) {
+          // Inject recording script directly since content script is available
+          if (browser.scripting) {
+            await browser.scripting.executeScript({
+              target: { tabId: tab.id, allFrames: true },
+              files: ['recordWorkflow.bundle.js']
+            });
+          } else {
+            await browser.tabs.executeScript(tab.id, {
+              file: 'recordWorkflow.bundle.js',
+              allFrames: true
+            });
+          }
+          console.log('Recording script injected into tab:', tab.id);
+        }
+      } catch (error) {
+        console.log('Could not inject into tab:', tab.id, error.message);
+      }
+    }
+  } catch (error) {
+    console.error('Error injecting recording scripts:', error);
+  }
 });
+
 onBeforeUnmount(() => {
   window.stopRecording = null;
   browser.storage.local.onChanged.removeListener(onStorageChanged);

@@ -1,3 +1,5 @@
+//This is the modified index.js file in Mime
+
 import { IS_FIREFOX } from '@/common/utils/constant';
 import BrowserAPIEventHandler from '@/service/browser-api/BrowserAPIEventHandler';
 import BrowserAPIService from '@/service/browser-api/BrowserAPIService';
@@ -6,6 +8,7 @@ import getFile, { readFileAsBase64 } from '@/utils/getFile';
 import { sleep } from '@/utils/helper';
 import { MessageListener } from '@/utils/message';
 import { nanoid } from 'nanoid';
+import CommandListener from './CommandListener';
 
 // import { getDocumentCtx } from '@/content/handleSelector';
 import { automaRefDataStr } from '@/workflowEngine/helper';
@@ -417,38 +420,7 @@ message.on(
   }
 );
 
-// Add handler to inject recording script
-// Replace the existing handler with this improved version
-message.on('inject:recordWorkflow', async ({ tabId }) => {
-  try {
-    // First check if content script is ready
-    const contentScriptReady = await browser.tabs.sendMessage(tabId, {
-      type: 'content-script-exists'
-    }).catch(() => false);
-    
-    if (!contentScriptReady) {
-      throw new Error('Content script not ready');
-    }
-    
-    // For MV3, use scripting API
-    if (browser.scripting) {
-      await browser.scripting.executeScript({
-        target: { tabId },
-        files: ['recordWorkflow.bundle.js']
-      });
-    } else {
-      // For MV2
-      await browser.tabs.executeScript(tabId, {
-        file: 'recordWorkflow.bundle.js'
-      });
-    }
-    
-    return { success: true };
-  } catch (error) {
-    console.error('Failed to inject recording script:', error);
-    throw error;
-  }
-});
+
 
 // Add handler to save recording as workflow
 message.on('recording:save', async ({ recording, name }) => {
@@ -1280,5 +1252,13 @@ message.on('downloads:watch-changed', async ({ downloadId, onComplete }) => {
 });
 
 automa('background', message);
+
+// Connect to command server for voice commands
+CommandListener.connect();
+
+// Reconnect on startup
+browser.runtime.onStartup.addListener(() => {
+  CommandListener.connect();
+});
 
 browser.runtime.onMessage.addListener(message.listener);

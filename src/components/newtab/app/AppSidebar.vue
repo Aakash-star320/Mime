@@ -26,10 +26,12 @@
       >
         <a
           v-tooltip:right.group="
-            `${t(`common.${tab.id}`, 2)} ${
-              tab.shortcut && `(${tab.shortcut.readable})`
-            }`
-          "
+    tab.id === 'commandTester' 
+      ? 'Command Tester'
+      : `${t(`common.${tab.id}`, 2)} ${
+          tab.shortcut && `(${tab.shortcut.readable})`
+        }`
+  "
           :class="{ 'is-active': isActive }"
           :href="tab.id === 'log' ? '#' : href"
           class="tab relative z-10 flex w-full items-center justify-center"
@@ -170,6 +172,12 @@ const tabs = [
     icon: 'riHistoryLine',
     path: '/logs',
     shortcut: getShortcut('page:logs', '/logs'),
+  },
+  {
+    id: 'commandTester',
+    icon: 'riCommandLine',
+    path: '/command-tester',
+    shortcut: '',
   },
   {
     id: 'settings',

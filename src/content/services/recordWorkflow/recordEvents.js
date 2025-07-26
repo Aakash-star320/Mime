@@ -14,6 +14,7 @@ let activeTabAdded = false; // Track if active tab block was added
 // Parameter detection variables
 let parameterMode = false;
 let parameterStartIndex = -1;
+let parameterEndIndex = -1; // Add this to track where parameter ends
 let parameterFieldSelector = null;
 let parameterAlreadyRecorded = false; // Only allow one parameter per recording
 let parameterOriginalValue = ''; // Store original value to restore
@@ -218,30 +219,27 @@ async function onKeydown(event) {
       parameterMode = true;
       parameterStartIndex = event.target.selectionStart;
       parameterFieldSelector = findSelector(event.target);
-      parameterOriginalValue = event.target.value; // Store original value
+      parameterOriginalValue = event.target.value; // Store original value to restore
       
       // Visual feedback - green outline
       event.target.style.outline = '3px solid #10b981';
       event.target.style.outlineOffset = '2px';
       
       console.log('Parameter mode started at position:', parameterStartIndex);
+      console.log('Original value stored:', parameterOriginalValue);
       
       return;
     } else {
       // End parameter mode
       parameterMode = false;
-      const paramEnd = event.target.selectionStart;
+      parameterEndIndex = event.target.selectionStart; // Store where parameter ends
       const currentValue = event.target.value;
-      const paramName = currentValue.substring(parameterStartIndex, paramEnd);
       
-      // Create the value with parameter for saving to workflow
+      // FIXED: Use the stored original value and parameter positions
       const valueForWorkflow = 
         parameterOriginalValue.substring(0, parameterStartIndex) + 
         `{{parameter}}` + 
-        parameterOriginalValue.substring(paramEnd);
-      
-      // Keep the original user-entered value in the input field (don't change what user sees)
-      // event.target.value remains unchanged
+        parameterOriginalValue.substring(parameterEndIndex);
       
       // Remove visual feedback
       event.target.style.outline = '';
@@ -250,8 +248,10 @@ async function onKeydown(event) {
       // Mark parameter as recorded
       parameterAlreadyRecorded = true;
       
-      console.log('Parameter created for workflow: {{parameter}}');
-      console.log('User sees in field:', currentValue);
+      console.log('Parameter mode ended');
+      console.log('Parameter start:', parameterStartIndex, 'end:', parameterEndIndex);
+      console.log('Original value:', parameterOriginalValue);
+      console.log('Current value (user sees):', currentValue);
       console.log('Workflow will save:', valueForWorkflow);
       
       // Update the recorded value in workflow
@@ -261,6 +261,7 @@ async function onKeydown(event) {
         for (let i = recording.flows.length - 1; i >= 0; i--) {
           const flow = recording.flows[i];
           if (flow.id === 'forms' && flow.data.selector === parameterFieldSelector) {
+            console.log('Updating existing forms block with parameter');
             flow.data.value = valueForWorkflow; // Save {{parameter}} version
             foundBlock = true;
             break;
@@ -269,6 +270,7 @@ async function onKeydown(event) {
         
         // If no existing Forms block found, create a new one
         if (!foundBlock) {
+          console.log('Creating new forms block with parameter');
           const elementName = (event.target.ariaLabel || event.target.name || '').slice(0, 12);
           const newBlock = {
             id: 'forms',
@@ -305,6 +307,9 @@ async function onKeydown(event) {
       // Mark form submission time to avoid recording URL change
       window.lastFormSubmission = Date.now();
 
+      // FIXED: Record the forms block with current value (not parameter mode affected value)
+      const valueToRecord = parameterMode ? parameterOriginalValue : event.target.value;
+      
       await addBlock({
         id: 'forms',
         data: {
@@ -312,8 +317,9 @@ async function onKeydown(event) {
           clearValue: true,
           type: 'text-field',
           waitForSelector: true,
-          value: event.target.value,
+          value: valueToRecord,
           selector: findSelector(event.target),
+          description: `Text field (${event.target.ariaLabel || event.target.name || ''})`,
         },
       });
 
@@ -520,7 +526,7 @@ const onInputTextField = debounce(({ target }) => {
     }
 
     const elementName = (target.ariaLabel || target.name || '').slice(0, 12);
-    recording.flows.push({
+    const newBlock = {
       id: 'forms',
       data: {
         selector,
@@ -531,7 +537,10 @@ const onInputTextField = debounce(({ target }) => {
         waitForSelector: true,
         description: `Text field (${elementName})`,
       },
-    });
+    };
+    
+    recording.flows.push(newBlock);
+    return newBlock;
   });
 }, 300);
 
@@ -581,6 +590,7 @@ export function cleanUp() {
   // Reset all state variables
   parameterMode = false;
   parameterStartIndex = -1;
+  parameterEndIndex = -1;
   parameterFieldSelector = null;
   userNavigatedToUrl = false;
   activeTabAdded = false;

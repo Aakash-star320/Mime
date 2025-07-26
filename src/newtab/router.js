@@ -17,6 +17,10 @@ import SettingsAbout from './pages/settings/SettingsAbout.vue';
 import SettingsShortcuts from './pages/settings/SettingsShortcuts.vue';
 import SettingsBackup from './pages/settings/SettingsBackup.vue';
 import SettingsEditor from './pages/settings/SettingsEditor.vue';
+// At the top with other imports
+import CommandTester from './pages/CommandTester.vue';
+
+
 
 const routes = [
   {
@@ -25,6 +29,12 @@ const routes = [
     redirect: '/workflows',
     component: Workflows,
   },
+  {
+  name: 'command-tester',
+  path: '/command-tester',
+  component: CommandTester,  // Static import instead of dynamic
+},
+  
   {
     name: 'welcome',
     path: '/welcome',

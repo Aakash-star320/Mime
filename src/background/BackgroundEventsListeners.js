@@ -1,3 +1,5 @@
+//This is the modified BackgroundEventsListeners.js file in Mime
+
 import browser from 'webextension-polyfill';
 import { initElementSelector } from '@/newtab/utils/elementSelector';
 import dayjs from 'dayjs';
