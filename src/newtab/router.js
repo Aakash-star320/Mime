@@ -11,6 +11,7 @@ import Storage from './pages/Storage.vue';
 import StorageTables from './pages/storage/Tables.vue';
 import LogsDetails from './pages/logs/[id].vue';
 import Recording from './pages/Recording.vue';
+import CommandTester from './pages/CommandTester.vue';
 import Settings from './pages/Settings.vue';
 import SettingsIndex from './pages/settings/SettingsIndex.vue';
 import SettingsAbout from './pages/settings/SettingsAbout.vue';
@@ -39,6 +40,11 @@ const routes = [
     name: 'recording',
     path: '/recording',
     component: Recording,
+  },
+  {
+    name: 'command-tester',
+    path: '/command-tester',
+    component: CommandTester,
   },
   {
     name: 'packages-details',

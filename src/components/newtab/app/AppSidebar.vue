@@ -154,6 +154,12 @@ const tabs = [
     shortcut: '',
   },
   {
+    id: 'command-tester',
+    icon: 'riTerminalBoxLine',
+    path: '/command-tester',
+    shortcut: '',
+  },
+  {
     id: 'schedule',
     icon: 'riTimeLine',
     path: '/schedule',
