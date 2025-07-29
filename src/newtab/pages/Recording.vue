@@ -178,8 +178,22 @@ async function stopRecording() {
   try {
     state.isGenerating = true;
 
+    console.log('🛑 Stopping recording...');
+    console.log('📊 Recorded flows:', state.flows);
+
+    // Check if recording has parameters BEFORE saving
+    const hasParameter = state.flows.some(flow => 
+      flow.id === 'forms' && 
+      flow.data?.value?.includes('{{parameter}}')
+    );
+
+    console.log('🔍 Has parameter:', hasParameter);
+
     if (state.flows.length !== 0) {
+      let savedWorkflowId = null;
+      
       if (state.workflowId) {
+        console.log('📝 Updating existing workflow:', state.workflowId);
         const workflow = workflowStore.getById(state.workflowId);
         const startBlock = workflow.drawflow.nodes.find(
           (node) => node.id === state.connectFrom.id
@@ -196,41 +210,166 @@ async function stopRecording() {
           id: state.workflowId,
           data: { drawflow },
         });
+        
+        savedWorkflowId = state.workflowId;
       } else {
+        console.log('📝 Creating new workflow:', state.name);
         const drawflow = generateDrawflow();
 
-        await workflowStore.insert({
+        const insertedWorkflows = await workflowStore.insert({
           drawflow,
           name: state.name,
           description: state.description ?? '',
         });
+        
+        // Get the ID of the newly created workflow
+        savedWorkflowId = Object.keys(insertedWorkflows)[0];
+        console.log('✅ New workflow created with ID:', savedWorkflowId);
       }
-    }
 
-    await browser.storage.local.remove(['isRecording', 'recording']);
-    await (browser.action || browser.browserAction).setBadgeText({ text: '' });
-
-    const tabs = (await browser.tabs.query({})).filter((tab) =>
-      tab.url.startsWith('http')
-    );
-    Promise.allSettled(
-      tabs.map(({ id }) =>
-        browser.tabs.sendMessage(id, { type: 'recording:stop' })
-      )
-    );
-
-    state.isGenerating = false;
-
-    if (state.workflowId) {
-      router.replace(
-        `/workflows/${state.workflowId}?blockId=${state.connectFrom.id}`
-      );
+      // NEW CODE: Handle parameter and API save
+      if (savedWorkflowId) {
+        console.log('💾 Preparing to save command to API...');
+        
+        if (hasParameter) {
+          console.log('⚙️ Workflow has parameter, showing dialog...');
+          
+          // Import dialog dynamically
+          const { useDialog } = await import('@/composable/dialog');
+          const dialog = useDialog();
+          
+          // Show parameter dialog
+          dialog.prompt({
+            title: 'Parameter Configuration',
+            placeholder: 'Enter parameter name (e.g., "Flash", "Batman", "search term")',
+            body: 'This workflow contains a parameter. What should we call it?',
+            okText: 'Save Command',
+            onConfirm: async (parameterName) => {
+              console.log('✅ Parameter name provided:', parameterName);
+              
+              if (parameterName?.trim()) {
+                // Save to API with parameter
+                await saveCommandToAPI({
+                  workflow_id: savedWorkflowId,
+                  command_name: state.name,
+                  has_parameter: true,
+                  parameter_name: parameterName.trim()
+                });
+              }
+              // Continue with navigation
+              navigateAfterSave(savedWorkflowId);
+            },
+            onCancel: () => {
+              console.log('❌ Parameter dialog cancelled');
+              // Still navigate even if cancelled
+              navigateAfterSave(savedWorkflowId);
+            }
+          });
+          
+          // Don't navigate yet - wait for dialog
+          return;
+        } else {
+          console.log('📝 No parameter, saving command directly...');
+          // No parameter - save and navigate
+          await saveCommandToAPI({
+            workflow_id: savedWorkflowId,
+            command_name: state.name,
+            has_parameter: false,
+            parameter_name: null
+          });
+        }
+        
+        navigateAfterSave(savedWorkflowId);
+      }
     } else {
-      router.replace('/');
+      console.log('⚠️ No flows recorded');
+      // No flows recorded
+      navigateAfterSave(null);
     }
   } catch (error) {
     state.isGenerating = false;
-    console.error(error);
+    console.error('❌ Error in stopRecording:', error);
+  }
+}
+
+// NEW FUNCTION: Add this function after stopRecording
+async function saveCommandToAPI(commandData) {
+  try {
+    console.log('📡 Saving command to API...', commandData);
+    
+    // Get user ID from storage
+    const { user } = await browser.storage.local.get('user');
+    const userId = user?.id || 'default_user';
+    
+    console.log('👤 User ID:', userId);
+    
+    const response = await fetch('http://localhost:8000/save-command', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        user_id: userId,
+        command_name: commandData.command_name,
+        has_parameter: commandData.has_parameter,
+        parameter_name: commandData.parameter_name,
+        workflow_id: commandData.workflow_id
+      }),
+    });
+    
+    const result = await response.json();
+    
+    if (!response.ok || !result.success) {
+      throw new Error(result.error || 'Failed to save command');
+    }
+    
+    console.log('✅ Command saved successfully to PostgreSQL:', result);
+    
+    // Save command reference locally too
+    const { savedCommands = [] } = await browser.storage.local.get('savedCommands');
+    savedCommands.push({
+      ...commandData,
+      user_id: userId,
+      api_id: result.id,
+      created_at: Date.now()
+    });
+    await browser.storage.local.set({ savedCommands });
+    
+    return result;
+  } catch (error) {
+    console.error('❌ Failed to save command to API:', error);
+    
+    // Don't throw - let workflow save continue even if API fails
+    return null;
+  }
+}
+
+// NEW FUNCTION: Add this function after saveCommandToAPI
+async function navigateAfterSave(workflowId) {
+  console.log('🚀 Navigating after save...');
+  
+  await browser.storage.local.remove(['isRecording', 'recording']);
+  await (browser.action || browser.browserAction).setBadgeText({ text: '' });
+
+  const tabs = (await browser.tabs.query({})).filter((tab) =>
+    tab.url.startsWith('http')
+  );
+  Promise.allSettled(
+    tabs.map(({ id }) =>
+      browser.tabs.sendMessage(id, { type: 'recording:stop' })
+    )
+  );
+
+  state.isGenerating = false;
+
+  if (state.workflowId) {
+    router.replace(
+      `/workflows/${state.workflowId}?blockId=${state.connectFrom.id}`
+    );
+  } else if (workflowId) {
+    router.replace(`/workflows/${workflowId}`);
+  } else {
+    router.replace('/');
   }
 }
 function removeBlock(index) {

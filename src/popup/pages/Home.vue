@@ -11,6 +11,28 @@
       <h1 class="text-xl font-semibold text-white">Automa</h1>
       <div class="grow"></div>
       
+      <!-- VOICE RECORDING BUTTON -->
+      <ui-button
+        v-if="!isVoiceRecording"
+        v-tooltip.group="'Start Voice Command'"
+        icon
+        class="mr-2 voice-btn"
+        @click="startVoiceRecording"
+        :disabled="isRecording || isProcessingVoice"
+      >
+        <v-remixicon name="riMicLine" class="text-blue-400" />
+      </ui-button>
+      <ui-button
+        v-else
+        v-tooltip.group="'Stop Voice Recording'"
+        icon
+        class="mr-2 voice-btn recording-pulse"
+        @click="stopVoiceRecording"
+        :disabled="isProcessingVoice"
+      >
+        <v-remixicon name="riMicFill" class="text-red-500" />
+      </ui-button>
+      
       <!-- RECORDING BUTTON -->
       <ui-button
         v-if="!isRecording"
@@ -18,6 +40,7 @@
         icon
         class="mr-2 recording-btn"
         @click="startRecording"
+        :disabled="isVoiceRecording || isProcessingVoice"
       >
         <v-remixicon name="riRecordCircleLine" class="text-red-400" />
       </ui-button>
@@ -50,6 +73,41 @@
         <v-remixicon name="riHome5Line" />
       </ui-button>
     </div>
+    
+    <!-- Voice Recording Status - ALWAYS VISIBLE WHEN ACTIVE -->
+    <div v-if="isVoiceRecording || isProcessingVoice" class="mb-2">
+      <div class="bg-blue-500/30 border border-blue-400 rounded-lg p-3 text-center">
+        <div v-if="isVoiceRecording" class="flex items-center justify-center">
+          <div class="voice-indicator mr-2"></div>
+          <span class="text-sm font-semibold">🎙️ LISTENING - Speak now...</span>
+        </div>
+        <div v-else-if="isProcessingVoice" class="flex items-center justify-center">
+          <ui-spinner size="16" class="mr-2" />
+          <span class="text-sm font-semibold">🔄 PROCESSING voice command...</span>
+        </div>
+      </div>
+    </div>
+    
+    <!-- Voice Command Result -->
+    <div v-if="lastVoiceResult" class="mb-2">
+      <div :class="voiceResultClass" class="rounded-lg p-3 text-center border">
+        <div class="flex items-center justify-center">
+          <v-remixicon 
+            :name="lastVoiceResult.success ? 'riCheckLine' : 'riCloseLine'" 
+            class="mr-2" 
+            size="16"
+          />
+          <span class="text-sm font-semibold">{{ lastVoiceResult.message }}</span>
+        </div>
+        <div v-if="lastVoiceResult.transcribed_text" class="text-xs mt-2 opacity-90 font-mono">
+          📝 "{{ lastVoiceResult.transcribed_text }}"
+        </div>
+        <div v-if="lastVoiceResult.success && lastVoiceResult.parameter" class="text-xs mt-1 opacity-90">
+          🎯 Parameter: {{ lastVoiceResult.parameter }}
+        </div>
+      </div>
+    </div>
+    
     <div class="flex">
       <ui-input
         v-model="state.query"
@@ -174,7 +232,6 @@
     <p class="text-sm leading-tight">
   If the workflow runs for less than 5 minutes, set it to run in the
   background in the
-    
 </p>
       <v-remixicon
         name="riCloseLine"
@@ -201,7 +258,7 @@ import { useWorkflowStore } from '@/stores/workflow';
 import { arraySorter, parseJSON } from '@/utils/helper';
 import { sendMessage } from '@/utils/message';
 import automa from '@business';
-import { computed, onMounted, shallowReactive, watch, ref } from 'vue';
+import { computed, onMounted, shallowReactive, watch, ref, onUnmounted } from 'vue';
 import { useI18n } from 'vue-i18n';
 import browser from 'webextension-polyfill';
 
@@ -240,6 +297,23 @@ const state = shallowReactive({
 });
 
 const isRecording = ref(false);
+
+// Voice recording state - FIXED VARIABLES
+const isVoiceRecording = ref(false);
+const isProcessingVoice = ref(false);
+const lastVoiceResult = ref(null);
+
+// GLOBAL VARIABLES - DO NOT RECREATE
+let currentMediaStream = null;
+let currentMediaRecorder = null;
+let audioChunks = [];
+
+const voiceResultClass = computed(() => {
+  if (!lastVoiceResult.value) return '';
+  return lastVoiceResult.value.success 
+    ? 'bg-green-500/20 text-green-300 border-green-400'
+    : 'bg-red-500/20 text-red-300 border-red-400';
+});
 
 const pinnedWorkflows = computed(() => {
   if (state.activeTab !== 'local') return [];
@@ -295,6 +369,445 @@ const showTab = computed(
     hostedWorkflowStore.toArray.length > 0 || userStore.user?.teams?.length > 0
 );
 
+// FIXED Voice recording functions
+// Voice recording functions - COMPLETELY REWRITTEN
+const startVoiceRecording = async () => {
+  console.log('🎙️ [Voice] === STARTING VOICE RECORDING ===');
+  
+  try {
+    // Check if already recording
+    if (isVoiceRecording.value) {
+      console.log('🎙️ [Voice] Already recording, stopping current session first...');
+      cleanupVoiceRecording();
+      await new Promise(resolve => setTimeout(resolve, 500)); // Wait 500ms
+    }
+    
+    // Clear any previous results
+    lastVoiceResult.value = null;
+    isProcessingVoice.value = false;
+    
+    console.log('🎙️ [Voice] Requesting microphone access...');
+    
+    // Request microphone with more specific constraints
+    const constraints = {
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+        sampleRate: { ideal: 16000 },
+        channelCount: { ideal: 1 },
+        sampleSize: { ideal: 16 }
+      }
+    };
+    
+    currentMediaStream = await navigator.mediaDevices.getUserMedia(constraints);
+    console.log('🎙️ [Voice] ✅ Microphone access granted');
+    
+    // Verify stream is active
+    const tracks = currentMediaStream.getAudioTracks();
+    console.log('🎙️ [Voice] Audio tracks:', tracks.length);
+    
+    if (tracks.length === 0) {
+      throw new Error('No audio tracks available');
+    }
+    
+    const track = tracks[0];
+    console.log('🎙️ [Voice] Track state:', track.readyState);
+    console.log('🎙️ [Voice] Track enabled:', track.enabled);
+    
+    if (track.readyState !== 'live') {
+      throw new Error('Audio track is not live');
+    }
+    
+    // Reset audio chunks
+    audioChunks = [];
+    
+    // Find the best supported MIME type
+    let selectedMimeType = null;
+    const mimeTypes = [
+      'audio/webm;codecs=opus',
+      'audio/webm',
+      'audio/ogg;codecs=opus',
+      'audio/mp4',
+      'audio/wav'
+    ];
+    
+    for (const mimeType of mimeTypes) {
+      if (MediaRecorder.isTypeSupported(mimeType)) {
+        selectedMimeType = mimeType;
+        console.log('🎙️ [Voice] Selected MIME type:', mimeType);
+        break;
+      }
+    }
+    
+    if (!selectedMimeType) {
+      throw new Error('No supported audio MIME types found');
+    }
+    
+    // Create MediaRecorder with error handling
+    try {
+      currentMediaRecorder = new MediaRecorder(currentMediaStream, {
+        mimeType: selectedMimeType,
+        audioBitsPerSecond: 128000
+      });
+    } catch (err) {
+      console.error('🎙️ [Voice] Failed to create MediaRecorder:', err);
+      // Try without specific settings
+      currentMediaRecorder = new MediaRecorder(currentMediaStream);
+      selectedMimeType = 'audio/webm'; // fallback
+    }
+    
+    console.log('🎙️ [Voice] MediaRecorder created successfully');
+    
+    // Set up ALL event handlers BEFORE starting
+    currentMediaRecorder.ondataavailable = (event) => {
+      console.log('🎙️ [Voice] 📦 Data chunk received:', event.data.size, 'bytes');
+      if (event.data && event.data.size > 0) {
+        audioChunks.push(event.data);
+        console.log('🎙️ [Voice] Total chunks:', audioChunks.length);
+      }
+    };
+    
+    currentMediaRecorder.onstart = () => {
+      console.log('🎙️ [Voice] ✅ MediaRecorder STARTED successfully');
+      // Set recording state ONLY after successful start
+      isVoiceRecording.value = true;
+    };
+    
+    currentMediaRecorder.onstop = async () => {
+      console.log('🎙️ [Voice] 📍 MediaRecorder STOPPED');
+      console.log('🎙️ [Voice] Total audio chunks collected:', audioChunks.length);
+      
+      // Don't set isVoiceRecording to false here - let stopVoiceRecording handle it
+      isProcessingVoice.value = true;
+      
+      try {
+        if (audioChunks.length === 0) {
+          throw new Error('No audio data was recorded');
+        }
+        
+        // Calculate total size
+        const totalSize = audioChunks.reduce((total, chunk) => total + chunk.size, 0);
+        console.log('🎙️ [Voice] Total audio size:', totalSize, 'bytes');
+        
+        if (totalSize < 1000) {
+          throw new Error('Audio data too small (less than 1KB)');
+        }
+        
+        // Create audio blob
+        const audioBlob = new Blob(audioChunks, { type: selectedMimeType });
+        console.log('🎙️ [Voice] Created audio blob:', audioBlob.size, 'bytes, type:', audioBlob.type);
+        
+        // Process the audio
+        await processVoiceCommand(audioBlob);
+        
+      } catch (error) {
+        console.error('🎙️ [Voice] ❌ Error in onstop handler:', error);
+        lastVoiceResult.value = {
+          success: false,
+          message: `Recording failed: ${error.message}`,
+          transcribed_text: ''
+        };
+      } finally {
+        isProcessingVoice.value = false;
+        cleanupVoiceRecording();
+      }
+    };
+    
+    currentMediaRecorder.onerror = (event) => {
+      console.error('🎙️ [Voice] ❌ MediaRecorder ERROR:', event.error);
+      lastVoiceResult.value = {
+        success: false,
+        message: `Recording error: ${event.error?.name || 'Unknown error'}`,
+        transcribed_text: ''
+      };
+      cleanupVoiceRecording();
+    };
+    
+    currentMediaRecorder.onpause = () => {
+      console.log('🎙️ [Voice] MediaRecorder PAUSED');
+    };
+    
+    currentMediaRecorder.onresume = () => {
+      console.log('🎙️ [Voice] MediaRecorder RESUMED');
+    };
+    
+    // Start recording with time slice for regular data collection
+    console.log('🎙️ [Voice] Starting MediaRecorder with 1000ms time slice...');
+    currentMediaRecorder.start(1000);
+    
+    // Verify it started
+    setTimeout(() => {
+      if (currentMediaRecorder && currentMediaRecorder.state === 'recording') {
+        console.log('🎙️ [Voice] ✅ Recording state verified as active');
+      } else {
+        console.error('🎙️ [Voice] ❌ Recording failed to start properly');
+        console.error('🎙️ [Voice] MediaRecorder state:', currentMediaRecorder?.state);
+        cleanupVoiceRecording();
+      }
+    }, 100);
+    
+  } catch (error) {
+    console.error('🎙️ [Voice] ❌ CRITICAL ERROR in startVoiceRecording:', error);
+    console.error('🎙️ [Voice] Error name:', error.name);
+    console.error('🎙️ [Voice] Error message:', error.message);
+    
+    cleanupVoiceRecording();
+    
+    let errorMessage = 'Failed to start voice recording';
+    let errorTitle = 'Recording Failed';
+    
+    if (error.name === 'NotAllowedError') {
+      errorTitle = 'Microphone Permission Denied';
+      errorMessage = 'Please allow microphone access in your browser settings and try again.';
+    } else if (error.name === 'NotFoundError') {
+      errorTitle = 'No Microphone Found';
+      errorMessage = 'No microphone device was detected. Please connect a microphone and try again.';
+    } else if (error.name === 'NotSupportedError') {
+      errorTitle = 'Browser Not Supported';
+      errorMessage = 'Your browser does not support voice recording. Please try a different browser.';
+    } else if (error.name === 'NotReadableError') {
+      errorTitle = 'Microphone Busy';
+      errorMessage = 'Your microphone is being used by another application. Please close other apps and try again.';
+    }
+    
+    dialog.confirm({
+      title: errorTitle,
+      body: errorMessage,
+      onlyOk: true,
+      okVariant: 'danger'
+    });
+  }
+};
+
+const stopVoiceRecording = () => {
+  console.log('🎙️ [Voice] === STOPPING VOICE RECORDING ===');
+  
+  if (!isVoiceRecording.value) {
+    console.log('🎙️ [Voice] ⚠️ Not currently recording, ignoring stop request');
+    return;
+  }
+  
+  // Set recording state to false IMMEDIATELY to prevent double-clicks
+  isVoiceRecording.value = false;
+  console.log('🎙️ [Voice] Set isVoiceRecording to FALSE');
+  
+  if (currentMediaRecorder) {
+    console.log('🎙️ [Voice] MediaRecorder state:', currentMediaRecorder.state);
+    
+    if (currentMediaRecorder.state === 'recording') {
+      console.log('🎙️ [Voice] Stopping MediaRecorder...');
+      currentMediaRecorder.stop();
+    } else if (currentMediaRecorder.state === 'paused') {
+      console.log('🎙️ [Voice] Resuming and stopping MediaRecorder...');
+      currentMediaRecorder.resume();
+      currentMediaRecorder.stop();
+    } else {
+      console.log('🎙️ [Voice] MediaRecorder not in recording state, cleaning up...');
+      cleanupVoiceRecording();
+    }
+  } else {
+    console.warn('🎙️ [Voice] No MediaRecorder available to stop');
+    cleanupVoiceRecording();
+  }
+};
+
+// Enhanced cleanup function
+const cleanupVoiceRecording = () => {
+  console.log('🎙️ [Voice] === CLEANUP STARTING ===');
+  
+  // Reset states first
+  isVoiceRecording.value = false;
+  isProcessingVoice.value = false;
+  
+  // Stop and clean up media stream
+  if (currentMediaStream) {
+    console.log('🎙️ [Voice] Stopping media stream tracks...');
+    currentMediaStream.getTracks().forEach((track, index) => {
+      console.log(`🎙️ [Voice] Stopping track ${index}:`, track.kind, track.label);
+      track.stop();
+    });
+    currentMediaStream = null;
+    console.log('🎙️ [Voice] Media stream cleaned up');
+  }
+  
+  // Clean up MediaRecorder
+  if (currentMediaRecorder) {
+    console.log('🎙️ [Voice] Cleaning up MediaRecorder...');
+    
+    // Remove event listeners to prevent memory leaks
+    currentMediaRecorder.ondataavailable = null;
+    currentMediaRecorder.onstop = null;
+    currentMediaRecorder.onerror = null;
+    currentMediaRecorder.onstart = null;
+    
+    currentMediaRecorder = null;
+    console.log('🎙️ [Voice] MediaRecorder cleaned up');
+  }
+  
+  // Clear audio chunks
+  audioChunks = [];
+  console.log('🎙️ [Voice] Audio chunks cleared');
+  
+  console.log('🎙️ [Voice] === CLEANUP COMPLETE ===');
+};
+
+const processVoiceCommand = async (audioBlob) => {
+  console.log('🔊 [Voice] === PROCESSING VOICE COMMAND ===');
+  console.log('🔊 [Voice] Audio blob details:', {
+    size: audioBlob.size,
+    type: audioBlob.type
+  });
+  
+  try {
+    // Get user ID
+    const { user } = await browser.storage.local.get('user');
+    const userId = user?.id || 'default_user';
+    console.log('🔊 [Voice] User ID:', userId);
+    
+    // Create FormData
+    const formData = new FormData();
+    formData.append('audio', audioBlob, 'voice-command.webm');
+    formData.append('user_id', userId);
+    
+    console.log('📤 [Voice] Sending to server at http://localhost:8000/voice-command...');
+    console.log('📤 [Voice] FormData contents:');
+    for (let [key, value] of formData.entries()) {
+      if (key === 'audio') {
+        console.log(`📤 [Voice] ${key}:`, value.size, 'bytes,', value.type);
+      } else {
+        console.log(`📤 [Voice] ${key}:`, value);
+      }
+    }
+    
+    // Send to server with timeout
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+    
+    const response = await fetch('http://localhost:8000/voice-command', {
+      method: 'POST',
+      body: formData,
+      signal: controller.signal
+    });
+    
+    clearTimeout(timeoutId);
+    
+    console.log('📥 [Voice] Server response status:', response.status);
+    console.log('📥 [Voice] Server response headers:', Object.fromEntries(response.headers.entries()));
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('📥 [Voice] Server error response:', errorText);
+      throw new Error(`Server error ${response.status}: ${errorText}`);
+    }
+    
+    const result = await response.json();
+    console.log('📥 [Voice] Server response data:', result);
+    
+    lastVoiceResult.value = result;
+    
+    // Auto-hide result after 15 seconds
+    setTimeout(() => {
+      if (lastVoiceResult.value === result) {
+        lastVoiceResult.value = null;
+      }
+    }, 15000);
+    
+    // Execute workflow if successful
+    if (result.success && result.workflow_id) {
+      console.log('✅ [Voice] Command matched! Executing workflow:', result.workflow_id);
+      
+      const workflow = workflowStore.getById(result.workflow_id);
+      if (workflow) {
+        console.log('✅ [Voice] Found workflow:', workflow.name);
+        
+        let workflowToExecute = JSON.parse(JSON.stringify(workflow));
+        
+        // Replace parameters
+        if (result.parameter) {
+          console.log('🔧 [Voice] Replacing parameter:', result.parameter);
+          
+          if (workflowToExecute.drawflow?.nodes) {
+            let replacementCount = 0;
+            workflowToExecute.drawflow.nodes.forEach(node => {
+              if (node.label === 'forms' && node.data?.value) {
+                if (node.data.value.includes('{{parameter}}')) {
+                  console.log(`🔧 [Voice] Before: ${node.data.value}`);
+                  node.data.value = node.data.value.replace(/\{\{parameter\}\}/g, result.parameter);
+                  console.log(`🔧 [Voice] After: ${node.data.value}`);
+                  replacementCount++;
+                }
+              }
+            });
+            console.log(`🔧 [Voice] Made ${replacementCount} parameter replacements`);
+          }
+        }
+        
+        // Execute workflow
+        console.log('🎯 [Voice] Executing workflow...');
+        await RendererWorkflowService.executeWorkflow(workflowToExecute, workflowToExecute.options);
+        
+        console.log('✅ [Voice] Workflow executed successfully');
+        
+        // Close popup after execution
+        setTimeout(() => {
+          window.close();
+        }, 1500);
+        
+      } else {
+        console.error('❌ [Voice] Workflow not found in local storage');
+        lastVoiceResult.value = {
+          success: false,
+          message: 'Workflow not found locally',
+          transcribed_text: result.transcribed_text || ''
+        };
+      }
+    } else {
+      console.log('ℹ️ [Voice] Command not matched or failed:', result.message);
+    }
+    
+  } catch (error) {
+    console.error('❌ [Voice] Error processing voice command:', error);
+    
+    let errorMessage = 'Failed to process voice command';
+    
+    if (error.name === 'AbortError') {
+      errorMessage = 'Voice processing timed out';
+    } else if (error.message.includes('fetch')) {
+      errorMessage = 'Cannot connect to voice server. Make sure the server is running.';
+    }
+    
+    lastVoiceResult.value = {
+      success: false,
+      message: errorMessage,
+      transcribed_text: ''
+    };
+  }
+};
+
+
+
+
+// Convert WebM to WAV (simplified version)
+const convertToWav = async (audioBlob) => {
+  try {
+    console.log('🔄 [Voice] Converting to WAV...');
+    // For now, just return the original blob - the server can handle WebM
+    return audioBlob;
+  } catch (error) {
+    console.error('🔄 [Voice] Conversion failed:', error);
+    return audioBlob;
+  }
+};
+
+
+
+// Cleanup on unmount
+onUnmounted(() => {
+  cleanupVoiceRecording();
+});
+
+// Rest of your existing functions...
 function openDocs() {
   window.open(
     'https://docs.automa.site/guide/quick-start.html#recording-actions',
@@ -528,8 +1041,18 @@ onMounted(async () => {
   background-color: rgba(239, 68, 68, 0.1) !important;
 }
 
+/* Voice button styles */
+.voice-btn:hover {
+  background-color: rgba(59, 130, 246, 0.1) !important;
+}
+
 .animate-pulse {
   animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+/* Voice recording pulse - MORE VISIBLE */
+.recording-pulse {
+  animation: voiceRecordingPulse 1s ease-in-out infinite;
 }
 
 @keyframes pulse {
@@ -538,6 +1061,42 @@ onMounted(async () => {
   }
   50% {
     opacity: 0.5;
+  }
+}
+
+@keyframes voiceRecordingPulse {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+    background-color: rgba(239, 68, 68, 0.2);
+  }
+  50% {
+    opacity: 0.7;
+    transform: scale(1.1);
+    background-color: rgba(239, 68, 68, 0.4);
+  }
+}
+
+/* Voice indicator animation - MORE VISIBLE */
+.voice-indicator {
+  width: 12px;
+  height: 12px;
+  background-color: #ef4444;
+  border-radius: 50%;
+  animation: voicePulse 0.8s ease-in-out infinite;
+  box-shadow: 0 0 8px rgba(239, 68, 68, 0.6);
+}
+
+@keyframes voicePulse {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+    box-shadow: 0 0 8px rgba(239, 68, 68, 0.6);
+  }
+  50% {
+    opacity: 0.6;
+    transform: scale(1.3);
+    box-shadow: 0 0 16px rgba(239, 68, 68, 0.8);
   }
 }
 </style>

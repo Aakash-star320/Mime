@@ -87,21 +87,34 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onBeforeUnmount } from 'vue';
+import { ref, onMounted, onBeforeUnmount, toRaw } from 'vue';
 import { useRouter } from 'vue-router';
 import { useToast } from 'vue-toastification';
 import browser from 'webextension-polyfill';
 import { sendMessage } from '@/utils/message';
 import { useWorkflowStore } from '@/stores/workflow';
+import { useDialog } from '@/composable/dialog';
+import { nanoid } from 'nanoid';
 
 const router = useRouter();
 const toast = useToast();
 const workflowStore = useWorkflowStore();
+const dialog = useDialog();
 
 const isRecording = ref(false);
 const workflowName = ref('');
 const workflowDescription = ref('');
 const recordedFlows = ref([]);
+
+// Recording state management
+const state = ref({
+  isGenerating: false,
+  name: '',
+  description: '',
+  flows: [],
+  workflowId: null,
+  connectFrom: null
+});
 
 let recordingCheckInterval = null;
 
@@ -140,6 +153,11 @@ const startRecording = async () => {
       }
     });
 
+    // Update state
+    state.value.name = workflowName.value;
+    state.value.description = workflowDescription.value;
+    state.value.flows = [];
+
     // Inject recording script
     await sendMessage('inject:recordWorkflow', { tabId: activeTab.id }, 'background');
     
@@ -163,54 +181,293 @@ const checkRecordingProgress = async () => {
   const { recording } = await browser.storage.local.get('recording');
   if (recording && recording.flows) {
     recordedFlows.value = recording.flows;
+    state.value.flows = recording.flows;
   }
 };
 
 const stopRecording = async () => {
-  isRecording.value = false;
-  
-  if (recordingCheckInterval) {
-    clearInterval(recordingCheckInterval);
-    recordingCheckInterval = null;
-  }
-  
-  await browser.storage.local.set({ isRecording: false });
-  await browser.action.setBadgeText({ text: '' });
-  
-  // Send stop message to content script
-  await sendMessage('recording:stop', null, 'background');
-};
+  if (state.value.isGenerating) return;
 
-const saveRecording = async () => {
   try {
-    const { recording } = await browser.storage.local.get('recording');
-    
-    if (!recording || recording.flows.length === 0) {
-      toast.error('No actions recorded');
-      return;
-    }
-    
-    // Save recording as workflow
-    const result = await sendMessage('recording:save', {
-      recording,
-      name: workflowName.value
-    }, 'background');
-    
-    if (result.success) {
-      toast.success('Workflow saved successfully!');
+    state.value.isGenerating = true;
+
+    console.log('🛑 Stopping recording...');
+    console.log('📊 Recorded flows:', state.value.flows);
+
+    // Check if recording has parameters BEFORE saving
+    const hasParameter = state.value.flows.some(flow => 
+      flow.id === 'forms' && 
+      flow.data?.value?.includes('{{parameter}}')
+    );
+
+    console.log('🔍 Has parameter:', hasParameter);
+
+    if (state.value.flows.length !== 0) {
+      let savedWorkflowId = null;
       
-      // Clean up
-      await browser.storage.local.remove(['recording', 'isRecording']);
-      await browser.action.setBadgeText({ text: '' });
-      
-      // Navigate to the new workflow
-      router.push(`/workflows/${result.workflowId}`);
+      if (state.value.workflowId) {
+        console.log('📝 Updating existing workflow:', state.value.workflowId);
+        // UPDATE existing workflow
+        const workflow = workflowStore.getById(state.value.workflowId);
+        const startBlock = workflow.drawflow.nodes.find(
+          (node) => node.id === state.value.connectFrom.id
+        );
+        const updatedDrawflow = generateDrawflow(state.value.connectFrom, startBlock);
+
+        const drawflow = {
+          ...workflow.drawflow,
+          nodes: [...workflow.drawflow.nodes, ...updatedDrawflow.nodes],
+          edges: [...workflow.drawflow.edges, ...updatedDrawflow.edges],
+        };
+
+        await workflowStore.update({
+          id: state.value.workflowId,
+          data: { drawflow },
+        });
+        
+        savedWorkflowId = state.value.workflowId;
+      } else {
+        console.log('📝 Creating new workflow:', state.value.name);
+        // CREATE new workflow
+        const drawflow = generateDrawflow();
+
+        const insertedWorkflows = await workflowStore.insert({
+          drawflow,
+          name: state.value.name,
+          description: state.value.description ?? '',
+        });
+        
+        // Get the ID of the newly created workflow
+        savedWorkflowId = Object.keys(insertedWorkflows)[0];
+        console.log('✅ New workflow created with ID:', savedWorkflowId);
+      }
+
+      // Handle parameter and API save
+      if (savedWorkflowId) {
+        console.log('💾 Preparing to save command to API...');
+        
+        if (hasParameter) {
+          console.log('⚙️ Workflow has parameter, showing dialog...');
+          
+          // Show parameter dialog
+          dialog.prompt({
+            title: 'Parameter Configuration',
+            placeholder: 'Enter parameter name (e.g., "Flash", "Batman", "search term")',
+            body: 'This workflow contains a parameter. What should we call it?',
+            okText: 'Save Command',
+            onConfirm: async (parameterName) => {
+              console.log('✅ Parameter name provided:', parameterName);
+              
+              if (parameterName?.trim()) {
+                // Save to API with parameter
+                await saveCommandToAPI({
+                  workflow_id: savedWorkflowId,
+                  command_name: state.value.name,
+                  has_parameter: true,
+                  parameter_name: parameterName.trim()
+                });
+              }
+              // Continue with navigation
+              navigateAfterSave(savedWorkflowId);
+            },
+            onCancel: () => {
+              console.log('❌ Parameter dialog cancelled');
+              // Still navigate even if cancelled
+              navigateAfterSave(savedWorkflowId);
+            }
+          });
+          
+          // Don't navigate yet - wait for dialog
+          return;
+        } else {
+          console.log('📝 No parameter, saving command directly...');
+          // No parameter - save and navigate
+          await saveCommandToAPI({
+            workflow_id: savedWorkflowId,
+            command_name: state.value.name,
+            has_parameter: false,
+            parameter_name: null
+          });
+        }
+        
+        navigateAfterSave(savedWorkflowId);
+      }
+    } else {
+      console.log('⚠️ No flows recorded');
+      // No flows recorded
+      navigateAfterSave(null);
     }
   } catch (error) {
-    console.error('Failed to save recording:', error);
-    toast.error('Failed to save workflow');
+    state.value.isGenerating = false;
+    console.error('❌ Error in stopRecording:', error);
+    toast.error('Failed to save recording');
   }
 };
+
+// Function to save command to API
+async function saveCommandToAPI(commandData) {
+  try {
+    console.log('📡 Saving command to API...', commandData);
+    
+    // Get user ID from storage
+    const { user } = await browser.storage.local.get('user');
+    const userId = user?.id || 'default_user';
+    
+    console.log('👤 User ID:', userId);
+    
+    const response = await fetch('http://localhost:8000/save-command', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        user_id: userId,
+        command_name: commandData.command_name,
+        has_parameter: commandData.has_parameter,
+        parameter_name: commandData.parameter_name,
+        workflow_id: commandData.workflow_id
+      }),
+    });
+    
+    const result = await response.json();
+    
+    if (!response.ok || !result.success) {
+      throw new Error(result.error || 'Failed to save command');
+    }
+    
+    console.log('✅ Command saved successfully to PostgreSQL:', result);
+    
+    // Save command reference locally too
+    const { savedCommands = [] } = await browser.storage.local.get('savedCommands');
+    savedCommands.push({
+      ...commandData,
+      user_id: userId,
+      api_id: result.id,
+      created_at: Date.now()
+    });
+    await browser.storage.local.set({ savedCommands });
+    
+    // Show success notification
+    toast.success('Command saved successfully!');
+    
+    return result;
+  } catch (error) {
+    console.error('❌ Failed to save command to API:', error);
+    
+    // Show error notification but don't throw - let workflow save continue
+    toast.error('Failed to save command. Make sure the API server is running.');
+    
+    return null;
+  }
+}
+
+// Function to navigate after save
+async function navigateAfterSave(workflowId) {
+  console.log('🚀 Navigating after save...');
+  
+  await browser.storage.local.remove(['isRecording', 'recording']);
+  await browser.action.setBadgeText({ text: '' });
+
+  const tabs = (await browser.tabs.query({})).filter((tab) =>
+    tab.url.startsWith('http')
+  );
+  Promise.allSettled(
+    tabs.map(({ id }) =>
+      browser.tabs.sendMessage(id, { type: 'recording:stop' })
+    )
+  );
+
+  state.value.isGenerating = false;
+
+  if (state.value.workflowId) {
+    router.replace(
+      `/workflows/${state.value.workflowId}?blockId=${state.value.connectFrom.id}`
+    );
+  } else if (workflowId) {
+    router.replace(`/workflows/${workflowId}`);
+  } else {
+    router.replace('/');
+  }
+}
+
+// Generate drawflow function
+function generateDrawflow(connectFrom, startBlock) {
+  const nodes = [];
+  const edges = [];
+  
+  // Add trigger node if this is a new workflow
+  if (!connectFrom) {
+    const triggerId = 'trigger-' + nanoid(8);
+    nodes.push({
+      id: triggerId,
+      label: 'trigger',
+      position: { x: 252, y: 68 },
+      data: {},
+      type: 'BlockBasic'
+    });
+    
+    // Add active-tab node
+    const activeTabId = 'active-tab-' + nanoid(8);
+    nodes.push({
+      id: activeTabId,
+      label: 'active-tab',
+      position: { x: 252, y: 188 },
+      data: {},
+      type: 'BlockBasic'
+    });
+    
+    // Create edge from trigger to active-tab
+    edges.push({
+      id: `${triggerId}-${activeTabId}`,
+      source: triggerId,
+      target: activeTabId,
+      sourceHandle: `${triggerId}-output-1`,
+      targetHandle: `${activeTabId}-input-1`
+    });
+    
+    connectFrom = { id: activeTabId };
+  }
+  
+  // Convert recorded flows to nodes
+  let position = { x: 252, y: 308 };
+  let previousNodeId = connectFrom.id;
+  
+  state.value.flows.forEach((flow, index) => {
+    const nodeId = `${flow.id}-${nanoid(8)}`;
+    
+    const node = {
+      id: nodeId,
+      label: flow.id,
+      data: flow.data || {},
+      position: { ...position },
+      type: 'BlockBasic'
+    };
+    
+    // Create edge from previous node
+    if (previousNodeId) {
+      edges.push({
+        id: `${previousNodeId}-${nodeId}`,
+        source: previousNodeId,
+        target: nodeId,
+        sourceHandle: `${previousNodeId}-output-1`,
+        targetHandle: `${nodeId}-input-1`
+      });
+    }
+    
+    nodes.push(node);
+    previousNodeId = nodeId;
+    position.y += 120;
+  });
+  
+  return { nodes, edges };
+}
+
+const saveRecording = async () => {
+  await stopRecording();
+};
+
+// Legacy methods for compatibility
+isRecording.value = false;
 
 onMounted(async () => {
   // Check if already recording
@@ -221,6 +478,11 @@ onMounted(async () => {
     workflowName.value = recording.name || '';
     workflowDescription.value = recording.description || '';
     recordedFlows.value = recording.flows || [];
+    
+    // Update internal state
+    state.value.name = recording.name || '';
+    state.value.description = recording.description || '';
+    state.value.flows = recording.flows || [];
     
     // Resume monitoring
     recordingCheckInterval = setInterval(checkRecordingProgress, 1000);

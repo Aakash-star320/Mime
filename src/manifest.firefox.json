@@ -56,7 +56,8 @@
     "storage",
     "webNavigation",
     "unlimitedStorage",
-    "<all_urls>"
+    "<all_urls>",
+    "microphone"
   ],
   "web_accessible_resources": [
     "/elementSelector.css",
