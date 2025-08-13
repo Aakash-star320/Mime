@@ -271,8 +271,8 @@ useHead(() => {
     title: 'Dashboard',
     titleTemplate:
       runningWorkflows > 0
-        ? `%s (${runningWorkflows} Workflows Running) - Automa`
-        : '%s - Automa',
+        ? `%s (${runningWorkflows} Workflows Running) - Mime`
+        : '%s - Mime',
   };
 });
 

@@ -8,7 +8,7 @@
     class="dark relative z-10 px-5 pt-8 text-white placeholder:text-black"
   >
     <div class="mb-4 flex items-center">
-      <h1 class="text-xl font-semibold text-white">Automa</h1>
+      <h1 class="text-xl font-semibold text-white">Mime</h1>
       <div class="grow"></div>
       
       <!-- VOICE RECORDING BUTTON -->
@@ -229,10 +229,10 @@
       v-if="state.showSettingsPopup"
       class="fixed bottom-5 left-0 m-4 rounded-lg bg-accent p-4 text-white shadow-md dark:text-black z-10"
     >
-    <p class="text-sm leading-tight">
-  If the workflow runs for less than 5 minutes, set it to run in the
-  background in the
-</p>
+      <p class="text-sm leading-tight">
+        If the workflow runs for less than 5 minutes, set it to run in the
+        background in the
+      </p>
       <v-remixicon
         name="riCloseLine"
         class="absolute top-2 right-2 cursor-pointer text-gray-300 dark:text-gray-600"
@@ -368,6 +368,54 @@ const showTab = computed(
   () =>
     hostedWorkflowStore.toArray.length > 0 || userStore.user?.teams?.length > 0
 );
+
+// UUID User ID initialization function
+async function initializeUserId() {
+  try {
+    console.log('🆔 [Extension] Initializing user ID...');
+    
+    // Check if user ID already exists in localStorage
+    const { user } = await browser.storage.local.get('user');
+    
+    if (user && user.id) {
+      console.log(`✅ [Extension] Found existing user ID: ${user.id}`);
+      return user.id;
+    }
+    
+    console.log('🆔 [Extension] No user ID found, generating new one...');
+    
+    // Generate new user ID from server
+    const response = await fetch('http://localhost:8000/get-user-id');
+    const result = await response.json();
+    
+    if (!response.ok || !result.success) {
+      throw new Error(result.message || 'Failed to get user ID');
+    }
+    
+    const newUserId = result.user_id;
+    console.log(`✅ [Extension] Generated new user ID: ${newUserId}`);
+    
+    // Save to browser storage
+    const newUser = { id: newUserId, created_at: Date.now() };
+    await browser.storage.local.set({ user: newUser });
+    
+    console.log('💾 [Extension] User ID saved to browser storage');
+    
+    return newUserId;
+    
+  } catch (error) {
+    console.error('❌ [Extension] Error initializing user ID:', error);
+    
+    // Fallback: generate a simple UUID client-side if server is down
+    const fallbackId = 'user_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+    console.log(`🔄 [Extension] Using fallback user ID: ${fallbackId}`);
+    
+    const fallbackUser = { id: fallbackId, created_at: Date.now(), fallback: true };
+    await browser.storage.local.set({ user: fallbackUser });
+    
+    return fallbackId;
+  }
+}
 
 // FIXED Voice recording functions
 // Voice recording functions - COMPLETELY REWRITTEN
@@ -660,9 +708,14 @@ const processVoiceCommand = async (audioBlob) => {
   });
   
   try {
-    // Get user ID
+    // Get user ID - CRITICAL: Use the UUID we initialized
     const { user } = await browser.storage.local.get('user');
-    const userId = user?.id || 'default_user';
+    const userId = user?.id;
+    
+    if (!userId) {
+      throw new Error('No user ID found. Please reload the extension.');
+    }
+    
     console.log('🔊 [Voice] User ID:', userId);
     
     // Create FormData
@@ -682,7 +735,7 @@ const processVoiceCommand = async (audioBlob) => {
     
     // Send to server with timeout
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+    const timeoutId = setTimeout(() => controller.abort(), 60000); // 30 second timeout
     
     const response = await fetch('http://localhost:8000/voice-command', {
       method: 'POST',
@@ -711,7 +764,7 @@ const processVoiceCommand = async (audioBlob) => {
       if (lastVoiceResult.value === result) {
         lastVoiceResult.value = null;
       }
-    }, 15000);
+    }, 30000);
     
     // Execute workflow if successful
     if (result.success && result.workflow_id) {
@@ -785,23 +838,6 @@ const processVoiceCommand = async (audioBlob) => {
   }
 };
 
-
-
-
-// Convert WebM to WAV (simplified version)
-const convertToWav = async (audioBlob) => {
-  try {
-    console.log('🔄 [Voice] Converting to WAV...');
-    // For now, just return the original blob - the server can handle WebM
-    return audioBlob;
-  } catch (error) {
-    console.error('🔄 [Voice] Conversion failed:', error);
-    return audioBlob;
-  }
-};
-
-
-
 // Cleanup on unmount
 onUnmounted(() => {
   cleanupVoiceRecording();
@@ -858,20 +894,170 @@ function renameWorkflow({ id, name }) {
     },
   });
 }
-function deleteWorkflow({ id, hostId, name }) {
+
+// REPLACE these functions in your Home.vue <script setup> section:
+
+
+async function deleteWorkflow({ id, hostId, name }) {
+  console.log(`🗑️ [Delete] Function called with:`, { id, hostId, name });
+  
   dialog.confirm({
     title: t('home.workflow.delete'),
     okVariant: 'danger',
     body: t('message.delete', { name }),
-    onConfirm: () => {
-      if (state.activeTab === 'local') {
-        workflowStore.delete(id);
-      } else {
-        hostedWorkflowStore.delete(hostId);
+    onConfirm: async () => {
+      try {
+        const workflowId = id || hostId;
+        console.log(`🗑️ [Workflow Delete] Starting deletion process for: ${name} (ID: ${workflowId})`);
+        
+        // Step 1: Delete voice commands from database using the new endpoint
+        await deleteVoiceCommandsForWorkflow(workflowId);
+        
+        // Step 2: Delete workflow from Automa stores
+        if (state.activeTab === 'local') {
+          console.log(`🗑️ [Workflow Delete] Deleting local workflow: ${id}`);
+          await workflowStore.delete(id);
+        } else {
+          console.log(`🗑️ [Workflow Delete] Deleting hosted workflow: ${hostId}`);
+          await hostedWorkflowStore.delete(hostId);
+        }
+        
+        console.log(`✅ [Workflow Delete] Successfully deleted workflow: ${name}`);
+        
+        // Show success message
+        showNotification(`Workflow "${name}" deleted successfully`, 'success');
+        
+      } catch (error) {
+        console.error(`❌ [Workflow Delete] Error deleting workflow "${name}":`, error);
+        
+        // Show error message to user
+        dialog.confirm({
+          title: 'Deletion Error',
+          body: `Failed to delete workflow "${name}". Some components may still exist.`,
+          onlyOk: true,
+          okVariant: 'danger'
+        });
       }
     },
   });
 }
+
+// NEW FUNCTION: Delete voice commands using the new workflow endpoint
+async function deleteVoiceCommandsForWorkflow(workflowId) {
+  try {
+    console.log(`🗄️ [Voice Commands] Starting deletion for workflow: ${workflowId}`);
+    
+    // Get user ID for the request
+    const { user } = await browser.storage.local.get('user');
+    const userId = user?.id;
+    
+    if (!userId) {
+      console.log(`⚠️ [Voice Commands] No user ID found, skipping database cleanup`);
+      return;
+    }
+    
+    console.log(`🗄️ [Voice Commands] User ID: ${userId}`);
+    console.log(`📤 [Voice Commands] Sending DELETE request to: http://localhost:8000/commands/workflow/${workflowId}`);
+    
+    // Call the new DELETE endpoint that deletes by workflow_id
+    const response = await fetch(`http://localhost:8000/commands/workflow/${workflowId}`, {
+      method: 'DELETE',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        user_id: userId
+      })
+    });
+    
+    console.log(`📥 [Voice Commands] Server response status: ${response.status}`);
+    console.log(`📥 [Voice Commands] Server response ok: ${response.ok}`);
+    
+    if (!response.ok) {
+      // Server error - but don't crash workflow deletion
+      console.log(`⚠️ [Voice Commands] Server error ${response.status}, but continuing with workflow deletion`);
+      
+      // Try to parse error response
+      try {
+        const errorData = await response.text();
+        console.log(`⚠️ [Voice Commands] Server error details: ${errorData}`);
+      } catch (parseError) {
+        console.log(`⚠️ [Voice Commands] Could not parse server error response`);
+      }
+      
+      return; // Don't throw error - let workflow deletion continue
+    }
+    
+    // Parse successful response
+    const result = await response.json();
+    console.log(`📥 [Voice Commands] Server response data:`, result);
+    
+    if (result.success) {
+      const deletedCount = result.deleted_count || 0;
+      
+      if (deletedCount > 0) {
+        console.log(`✅ [Voice Commands] Successfully deleted ${deletedCount} voice commands for workflow ${workflowId}`);
+        
+        // Log details of deleted commands
+        if (result.commands && result.commands.length > 0) {
+          console.log(`✅ [Voice Commands] Deleted commands:`);
+          result.commands.forEach((cmd, index) => {
+            console.log(`✅ [Voice Commands]   ${index + 1}. "${cmd.command_name}" ${cmd.has_parameter ? `(with parameter: ${cmd.parameter_name})` : '(no parameter)'}`);
+          });
+        }
+        
+        // Show success notification
+        showNotification(`Deleted ${deletedCount} voice command${deletedCount === 1 ? '' : 's'}`, 'info');
+      } else {
+        console.log(`ℹ️ [Voice Commands] No voice commands found for workflow ${workflowId}`);
+      }
+    } else {
+      console.warn(`⚠️ [Voice Commands] Server reported failure: ${result.message || 'Unknown error'}`);
+    }
+    
+  } catch (error) {
+    console.error(`❌ [Voice Commands] Error during voice command cleanup for workflow ${workflowId}:`, error);
+    
+    // Check for specific error types
+    if (error.name === 'TypeError' && error.message.includes('fetch')) {
+      console.log(`⚠️ [Voice Commands] Voice command server is not running - skipping database cleanup`);
+    } else {
+      console.log(`⚠️ [Voice Commands] Unexpected error during voice command cleanup: ${error.message}`);
+    }
+    
+    // Don't throw error - voice command deletion failure shouldn't prevent workflow deletion
+    console.log(`⚠️ [Voice Commands] Voice command cleanup failed, but continuing with workflow deletion`);
+  }
+}
+
+// NEW FUNCTION: Show notification to user
+function showNotification(message, type = 'info') {
+  try {
+    console.log(`📢 [Notification] ${type.toUpperCase()}: ${message}`);
+    
+    // Create a simple notification element
+    const notification = document.createElement('div');
+    notification.className = `fixed top-4 right-4 px-6 py-3 rounded-lg shadow-lg z-50 text-white font-medium ${
+      type === 'success' ? 'bg-green-500' : 
+      type === 'error' ? 'bg-red-500' : 
+      'bg-blue-500'
+    }`;
+    notification.textContent = message;
+    
+    document.body.appendChild(notification);
+    
+    // Auto-remove after 3 seconds
+    setTimeout(() => {
+      if (notification.parentNode) {
+        notification.parentNode.removeChild(notification);
+      }
+    }, 3000);
+    
+  } catch (error) {
+    console.error('Error showing notification:', error);
+  }
+}
+
 function openDashboard(url) {
   BackgroundUtils.openDashboard(url);
 }
@@ -926,7 +1112,7 @@ const startRecording = async () => {
     dialog.prompt({
       title: t('recording.title') || 'New Recording',
       placeholder: t('common.name') || 'Workflow name',
-      okText: t('common.start') || 'Start Recording',
+      okText: t('Start') || 'Start Recording',
       inputValue: 'New Recording',
       onConfirm: async (workflowName) => {
         if (!workflowName.trim()) {
@@ -991,6 +1177,9 @@ watch(
 );
 
 onMounted(async () => {
+  // Initialize user ID first - CRITICAL FOR UUID FUNCTIONALITY
+  await initializeUserId();
+  
   // Check recording state
   const { isRecording: recording } = await browser.storage.local.get('isRecording');
   isRecording.value = recording || false;

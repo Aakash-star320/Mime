@@ -40,14 +40,71 @@ export const useHostedWorkflowStore = defineStore('hosted-workflows', {
 
       return data;
     },
-    async delete(id) {
-      delete this.workflows[id];
+   async delete(id) {
+  console.log('🗑️ [Hosted Workflow Store] Starting hosted workflow deletion:', id);
+  
+  // Delete voice commands for this workflow
+  await this.deleteVoiceCommandsForWorkflow(id);
+  
+  delete this.workflows[id];
 
-      await this.saveToStorage('workflows');
-      await cleanWorkflowTriggers(id);
+  await this.saveToStorage('workflows');
+  await cleanWorkflowTriggers(id);
 
-      return id;
-    },
+  console.log('✅ [Hosted Workflow Store] Hosted workflow deletion completed:', id);
+  
+  return id;
+},
+
+// NEW METHOD: Add this voice command cleanup method to the hosted workflow store
+async deleteVoiceCommandsForWorkflow(workflowId) {
+  try {
+    console.log(`🗄️ [Hosted Workflow Store] Starting voice command deletion for workflow: ${workflowId}`);
+    
+    // Get user ID for the request
+    const { user } = await browser.storage.local.get('user');
+    const userId = user?.id;
+    
+    if (!userId) {
+      console.log(`⚠️ [Hosted Workflow Store] No user ID found, skipping voice command cleanup`);
+      return;
+    }
+    
+    console.log(`🗄️ [Hosted Workflow Store] User ID: ${userId}`);
+    console.log(`📤 [Hosted Workflow Store] Sending DELETE request to: http://localhost:8000/commands/workflow/${workflowId}`);
+    
+    // Call the DELETE endpoint that deletes by workflow_id
+    const response = await fetch(`http://localhost:8000/commands/workflow/${workflowId}`, {
+      method: 'DELETE',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        user_id: userId
+      })
+    });
+    
+    console.log(`📥 [Hosted Workflow Store] Server response status: ${response.status}`);
+    
+    if (!response.ok) {
+      console.log(`⚠️ [Hosted Workflow Store] Server error ${response.status}, but continuing with workflow deletion`);
+      return;
+    }
+    
+    const result = await response.json();
+    console.log(`📥 [Hosted Workflow Store] Server response data:`, result);
+    
+    if (result.success && result.deleted_count > 0) {
+      console.log(`✅ [Hosted Workflow Store] Successfully deleted ${result.deleted_count} voice commands for workflow ${workflowId}`);
+    } else {
+      console.log(`ℹ️ [Hosted Workflow Store] No voice commands found for workflow ${workflowId}`);
+    }
+    
+  } catch (error) {
+    console.error(`❌ [Hosted Workflow Store] Error during voice command cleanup for workflow ${workflowId}:`, error);
+    console.log(`⚠️ [Hosted Workflow Store] Voice command cleanup failed, but continuing with workflow deletion`);
+  }
+},
     async update({ id, data }) {
       if (!this.workflows[id]) return null;
 

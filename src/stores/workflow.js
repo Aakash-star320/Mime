@@ -244,57 +244,152 @@ export const useWorkflowStore = defineStore('workflow', {
       return insertedData;
     },
     async delete(id) {
-      if (Array.isArray(id)) {
-        id.forEach((workflowId) => {
-          delete this.workflows[workflowId];
-        });
+  console.log('🗑️ [Workflow Store] Starting workflow deletion:', id);
+  
+  // Handle array of IDs
+  if (Array.isArray(id)) {
+    console.log('🗑️ [Workflow Store] Deleting multiple workflows:', id);
+    
+    // Delete voice commands for each workflow
+    for (const workflowId of id) {
+      await this.deleteVoiceCommandsForWorkflow(workflowId);
+      delete this.workflows[workflowId];
+    }
+  } else {
+    console.log('🗑️ [Workflow Store] Deleting single workflow:', id);
+    
+    // Delete voice commands for this workflow
+    await this.deleteVoiceCommandsForWorkflow(id);
+    delete this.workflows[id];
+  }
+
+  await cleanWorkflowTriggers(id);
+
+  const userStore = useUserStore();
+
+  const hostedWorkflow = userStore.hostedWorkflows[id];
+  const backupIndex = userStore.backupIds.indexOf(id);
+
+  if (hostedWorkflow || backupIndex !== -1) {
+    const response = await fetchApi(`/me/workflows?id=${id}`, {
+      auth: true,
+      method: 'DELETE',
+    });
+    const result = await response.json();
+
+    if (!response.ok) {
+      throw new Error(result.message);
+    }
+
+    if (backupIndex !== -1) {
+      userStore.backupIds.splice(backupIndex, 1);
+      await browser.storage.local.set({ backupIds: userStore.backupIds });
+    }
+  }
+
+  await browser.storage.local.remove([
+    `state:${id}`,
+    `draft:${id}`,
+    `draft-team:${id}`,
+  ]);
+  await this.saveToStorage('workflows');
+
+  const { pinnedWorkflows } = await browser.storage.local.get(
+    'pinnedWorkflows'
+  );
+  const pinnedWorkflowIndex = pinnedWorkflows?.indexOf(id);
+  
+  if (pinnedWorkflowIndex !== -1) {
+    pinnedWorkflows.splice(pinnedWorkflowIndex, 1);
+    await browser.storage.local.set({ pinnedWorkflows });
+  }
+  
+  console.log('✅ [Workflow Store] Workflow deletion completed:', id);
+},
+
+// NEW METHOD: Add this voice command cleanup method to the workflow store
+async deleteVoiceCommandsForWorkflow(workflowId) {
+  try {
+    console.log(`🗄️ [Workflow Store] Starting voice command deletion for workflow: ${workflowId}`);
+    
+    // Get user ID for the request
+    const { user } = await browser.storage.local.get('user');
+    const userId = user?.id;
+    
+    if (!userId) {
+      console.log(`⚠️ [Workflow Store] No user ID found, skipping voice command cleanup`);
+      return;
+    }
+    
+    console.log(`🗄️ [Workflow Store] User ID: ${userId}`);
+    console.log(`📤 [Workflow Store] Sending DELETE request to: http://localhost:8000/commands/workflow/${workflowId}`);
+    
+    // Call the DELETE endpoint that deletes by workflow_id
+    const response = await fetch(`http://localhost:8000/commands/workflow/${workflowId}`, {
+      method: 'DELETE',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        user_id: userId
+      })
+    });
+    
+    console.log(`📥 [Workflow Store] Server response status: ${response.status}`);
+    console.log(`📥 [Workflow Store] Server response ok: ${response.ok}`);
+    
+    if (!response.ok) {
+      // Server error - but don't crash workflow deletion
+      console.log(`⚠️ [Workflow Store] Server error ${response.status}, but continuing with workflow deletion`);
+      
+      // Try to parse error response
+      try {
+        const errorData = await response.text();
+        console.log(`⚠️ [Workflow Store] Server error details: ${errorData}`);
+      } catch (parseError) {
+        console.log(`⚠️ [Workflow Store] Could not parse server error response`);
+      }
+      
+      return; // Don't throw error - let workflow deletion continue
+    }
+    
+    // Parse successful response
+    const result = await response.json();
+    console.log(`📥 [Workflow Store] Server response data:`, result);
+    
+    if (result.success) {
+      const deletedCount = result.deleted_count || 0;
+      
+      if (deletedCount > 0) {
+        console.log(`✅ [Workflow Store] Successfully deleted ${deletedCount} voice commands for workflow ${workflowId}`);
+        
+        // Log details of deleted commands
+        if (result.commands && result.commands.length > 0) {
+          console.log(`✅ [Workflow Store] Deleted commands:`);
+          result.commands.forEach((cmd, index) => {
+            console.log(`✅ [Workflow Store]   ${index + 1}. "${cmd.command_name}" ${cmd.has_parameter ? `(with parameter: ${cmd.parameter_name})` : '(no parameter)'}`);
+          });
+        }
       } else {
-        delete this.workflows[id];
+        console.log(`ℹ️ [Workflow Store] No voice commands found for workflow ${workflowId}`);
       }
-
-      await cleanWorkflowTriggers(id);
-
-      const userStore = useUserStore();
-
-      const hostedWorkflow = userStore.hostedWorkflows[id];
-      const backupIndex = userStore.backupIds.indexOf(id);
-
-      if (hostedWorkflow || backupIndex !== -1) {
-        const response = await fetchApi(`/me/workflows?id=${id}`, {
-          auth: true,
-          method: 'DELETE',
-        });
-        const result = await response.json();
-
-        if (!response.ok) {
-          throw new Error(result.message);
-        }
-
-        if (backupIndex !== -1) {
-          userStore.backupIds.splice(backupIndex, 1);
-          await browser.storage.local.set({ backupIds: userStore.backupIds });
-        }
-      }
-
-      await browser.storage.local.remove([
-        `state:${id}`,
-        `draft:${id}`,
-        `draft-team:${id}`,
-      ]);
-      await this.saveToStorage('workflows');
-
-      const { pinnedWorkflows } = await browser.storage.local.get(
-        'pinnedWorkflows'
-      );
-      const pinnedWorkflowIndex = pinnedWorkflows
-        ? pinnedWorkflows.indexOf(id)
-        : -1;
-      if (pinnedWorkflowIndex !== -1) {
-        pinnedWorkflows.splice(pinnedWorkflowIndex, 1);
-        await browser.storage.local.set({ pinnedWorkflows });
-      }
-
-      return id;
-    },
+    } else {
+      console.warn(`⚠️ [Workflow Store] Server reported failure: ${result.message || 'Unknown error'}`);
+    }
+    
+  } catch (error) {
+    console.error(`❌ [Workflow Store] Error during voice command cleanup for workflow ${workflowId}:`, error);
+    
+    // Check for specific error types
+    if (error.name === 'TypeError' && error.message.includes('fetch')) {
+      console.log(`⚠️ [Workflow Store] Voice command server is not running - skipping database cleanup`);
+    } else {
+      console.log(`⚠️ [Workflow Store] Unexpected error during voice command cleanup: ${error.message}`);
+    }
+    
+    // Don't throw error - voice command deletion failure shouldn't prevent workflow deletion
+    console.log(`⚠️ [Workflow Store] Voice command cleanup failed, but continuing with workflow deletion`);
+  }
+}
   },
 });
